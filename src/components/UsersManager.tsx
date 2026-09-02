@@ -43,12 +43,14 @@ export const UsersManager: React.FC = () => {
     deleteUser,
     toggleUserStatus,
     resetUserPasswordByAdmin,
+    syncUsersWithGoogleSheet,
   } = useApp();
 
   const [searchTerm, setSearchTerm] = useState('');
   const [filterPrivilege, setFilterPrivilege] = useState<string>('all');
   const [showModal, setShowModal] = useState(false);
   const [editingUser, setEditingUser] = useState<AppUser | null>(null);
+  const [isSyncingSheets, setIsSyncingSheets] = useState(false);
 
   // Password reset modal states
   const [resetModalUser, setResetModalUser] = useState<AppUser | null>(null);
@@ -279,6 +281,24 @@ export const UsersManager: React.FC = () => {
     }
   };
 
+  const handleSyncUsersSheet = async () => {
+    setIsSyncingSheets(true);
+    try {
+      const res = await syncUsersWithGoogleSheet();
+      setFeedback({
+        type: res.success ? 'success' : 'error',
+        text: res.message || `Sincronização concluída: ${res.count} colaborador(es) sincronizados da aba Usuários do Google Sheets.`,
+      });
+    } catch (err: any) {
+      setFeedback({
+        type: 'error',
+        text: `Falha ao sincronizar com Google Sheets: ${err?.message || 'Erro de rede'}`,
+      });
+    } finally {
+      setIsSyncingSheets(false);
+    }
+  };
+
   const filteredUsers = users.filter((u) => {
     const matchesSearch =
       u.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -309,6 +329,17 @@ export const UsersManager: React.FC = () => {
         </div>
 
         <div className="relative z-10 flex flex-wrap gap-2.5 shrink-0">
+          <button
+            type="button"
+            onClick={handleSyncUsersSheet}
+            disabled={isSyncingSheets}
+            className="px-4 py-3 bg-white/10 hover:bg-white/20 active:scale-98 text-white rounded-2xl font-black text-xs flex items-center gap-2 border border-white/20 cursor-pointer transition-all disabled:opacity-60 shadow-md"
+            title="Sincronizar colaboradores com a aba Usuários do Google Sheets (GID 2018208122)"
+          >
+            <RefreshCw className={`w-4 h-4 text-emerald-400 ${isSyncingSheets ? 'animate-spin' : ''}`} />
+            <span>{isSyncingSheets ? 'Sincronizando...' : 'Sincronizar Planilha'}</span>
+          </button>
+
           <button
             type="button"
             onClick={handleOpenCreate}
@@ -665,7 +696,7 @@ export const UsersManager: React.FC = () => {
                     required
                     value={name}
                     onChange={(e) => setName(e.target.value)}
-                    placeholder="ex: Carlos Alberto Silva"
+                    placeholder="ex: Nome do Colaborador"
                     className="w-full bg-slate-50 border border-slate-300 rounded-2xl px-3.5 py-2.5 text-xs text-slate-900 focus:outline-none focus:border-red-600 focus:bg-white font-medium"
                   />
                 </div>
@@ -679,7 +710,7 @@ export const UsersManager: React.FC = () => {
                     required
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    placeholder="ex: carlos.silva@wfs.aero"
+                    placeholder="ex: colaborador@wfs.aero"
                     className="w-full bg-slate-50 border border-slate-300 rounded-2xl px-3.5 py-2.5 text-xs text-slate-900 focus:outline-none focus:border-red-600 focus:bg-white font-mono"
                   />
                 </div>

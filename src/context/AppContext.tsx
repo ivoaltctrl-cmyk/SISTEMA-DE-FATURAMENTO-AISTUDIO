@@ -23,6 +23,7 @@ import {
 import {
   calculateDuration,
   fetchOrdersFromGoogleSheet,
+  fetchSheetUsers,
   getSheetsConfig,
   parseCSVToRows,
   parseSheetRowsToOrders,
@@ -33,6 +34,7 @@ import {
 import {
   mergeWithMasterUser,
   MASTER_ADMIN_USER,
+  isLegacyMockUser,
   fetchGlobalSystemState,
   publishGlobalSystemState,
 } from '../services/cloudSyncService';
@@ -61,6 +63,7 @@ interface AppContextType {
   syncWithGoogleSheet: (sheetUrlOrId?: string, isBackground?: boolean) => Promise<{ success: boolean; message: string; count: number }>;
   importRawSheetData: (rawText: string) => { success: boolean; message: string; count: number };
   pushOrdersToGoogleSheet: (webhookUrl?: string) => Promise<{ success: boolean; message: string }>;
+  syncUsersWithGoogleSheet: () => Promise<{ success: boolean; message: string; count: number; users: AppUser[] }>;
   isSyncingSheets: boolean;
   lastAutoSyncTime: Date | null;
   isAutoSyncActive: boolean;
@@ -174,6 +177,23 @@ const LOCAL_STORAGE_KEY_PREFIX = 'os_digital_app_';
 const DEFAULT_MASTER_PASSWORD = 'admin';
 const DEFAULT_EXECUTIVE_PASSWORD = 'admin';
 
+export const isLegacyMockOrder = (o: any): boolean => {
+  if (!o || !o.id) return false;
+  const id = String(o.id);
+  const client = String(o.clientName || '');
+  return (
+    id.startsWith('os-31877-') ||
+    id.startsWith('os-10') ||
+    id === 'os-1' ||
+    id === 'os-100' ||
+    client.includes('Construtora') ||
+    client.includes('Metalmecânica') ||
+    client.includes('Metalmecanica') ||
+    client.includes('EcoLog') ||
+    client.includes('InfraObras')
+  );
+};
+
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [company, setCompanyState] = useState<CompanyProfile>(() => {
     const saved = localStorage.getItem(`${LOCAL_STORAGE_KEY_PREFIX}company`);
@@ -190,16 +210,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const saved = localStorage.getItem(`${LOCAL_STORAGE_KEY_PREFIX}current_user`);
     if (saved) {
       try {
-        return JSON.parse(saved);
+        const parsed = JSON.parse(saved);
+        if (parsed && !isLegacyMockUser(parsed)) {
+          return parsed;
+        }
       } catch {}
     }
-    return initialUsers[0] || {
-      id: 'usr-default',
-      name: 'Carlos Silva',
-      role: 'operador_campo',
-      roleLabel: 'Encarregado de Campo & Pista',
-      avatarColor: 'bg-amber-600',
-    };
+    return initialUsers[0] || MASTER_ADMIN_USER;
   });
 
   const [clients, setClients] = useState<Client[]>(() => {
@@ -219,7 +236,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [orders, setOrders] = useState<ServiceOrder[]>(() => {
     const saved = localStorage.getItem(`${LOCAL_STORAGE_KEY_PREFIX}orders`);
-    return saved !== null ? JSON.parse(saved) : initialOrders;
+    if (saved !== null) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed.filter((o: ServiceOrder) => !isLegacyMockOrder(o));
+        }
+      } catch {}
+    }
+    return initialOrders.filter((o: ServiceOrder) => !isLegacyMockOrder(o));
   });
 
   const [invoices, setInvoices] = useState<Invoice[]>(() => {
@@ -351,6 +376,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     localStorage.setItem(`${LOCAL_STORAGE_KEY_PREFIX}master_pwd`, masterPassword);
   }, [masterPassword]);
 
+  // Immediate startup purge of legacy demonstration mock users from local storage
+  useEffect(() => {
+    try {
+      const savedUsers = localStorage.getItem(`${LOCAL_STORAGE_KEY_PREFIX}users`);
+      if (savedUsers) {
+        const parsed = JSON.parse(savedUsers);
+        if (Array.isArray(parsed)) {
+          const cleaned = mergeWithMasterUser(parsed);
+          if (cleaned.length !== parsed.length) {
+            localStorage.setItem(`${LOCAL_STORAGE_KEY_PREFIX}users`, JSON.stringify(cleaned));
+            setUsers(cleaned);
+          }
+        }
+      }
+
+      const savedCurrent = localStorage.getItem(`${LOCAL_STORAGE_KEY_PREFIX}current_user`);
+      if (savedCurrent) {
+        const parsed = JSON.parse(savedCurrent);
+        if (isLegacyMockUser(parsed)) {
+          localStorage.setItem(`${LOCAL_STORAGE_KEY_PREFIX}current_user`, JSON.stringify(MASTER_ADMIN_USER));
+          setCurrentUserState(MASTER_ADMIN_USER);
+        }
+      }
+    } catch {}
+  }, []);
+
   // Real-time synchronization with server state & maintenance status (SSE + BroadcastChannel + Auto-sync)
   useEffect(() => {
     let eventSource: EventSource | null = null;
@@ -395,7 +446,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const ordensRes = await ordensApi.getAll();
         if (ordensRes.success && Array.isArray(ordensRes.orders) && ordensRes.orders.length > 0) {
           isRemoteOrdersUpdateRef.current = true;
-          setOrders(ordensRes.orders);
+          const cleanOrders = ordensRes.orders.filter((o: ServiceOrder) => !isLegacyMockOrder(o));
+          setOrders(cleanOrders);
           setLastAutoSyncTime(new Date());
         }
       } catch (err) {
@@ -407,9 +459,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const usersRes = await usersApi.getAll();
         if (usersRes.success && Array.isArray(usersRes.users) && usersRes.users.length > 0) {
           setUsers(mergeWithMasterUser(usersRes.users));
+        } else {
+          // Fallback: sync directly with the Google Sheets "Usuários" tab (GID 2018208122)
+          fetchSheetUsers().then((sheetRes) => {
+            if (sheetRes.success && sheetRes.users.length > 0) {
+              setUsers(mergeWithMasterUser(sheetRes.users));
+            }
+          }).catch(() => {});
         }
       } catch (err) {
         console.warn('GET /api/users fallback:', err);
+        fetchSheetUsers().then((sheetRes) => {
+          if (sheetRes.success && sheetRes.users.length > 0) {
+            setUsers(mergeWithMasterUser(sheetRes.users));
+          }
+        }).catch(() => {});
       }
     };
 
@@ -438,7 +502,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (data.type === 'STATE_CHANGE' && data.appState) {
             if (Array.isArray(data.appState.orders)) {
               isRemoteOrdersUpdateRef.current = true;
-              setOrders(data.appState.orders);
+              setOrders(data.appState.orders.filter((o: ServiceOrder) => !isLegacyMockOrder(o)));
               setLastAutoSyncTime(new Date());
             }
             if (Array.isArray(data.appState.invoices)) {
@@ -476,7 +540,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             }
           } else if (ev.data?.type === 'LOCAL_ORDERS_UPDATE' && Array.isArray(ev.data.orders)) {
             isRemoteOrdersUpdateRef.current = true;
-            setOrders(ev.data.orders);
+            setOrders(ev.data.orders.filter((o: ServiceOrder) => !isLegacyMockOrder(o)));
             setLastAutoSyncTime(new Date());
           } else if (ev.data?.type === 'LOCAL_INVOICES_UPDATE' && Array.isArray(ev.data.invoices)) {
             isRemoteInvoicesUpdateRef.current = true;
@@ -634,6 +698,59 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
     setUsers(updatedUsers);
     publishGlobalSystemState({ users: updatedUsers });
+  };
+
+  const syncUsersWithGoogleSheet = async (): Promise<{ success: boolean; message: string; count: number; users: AppUser[] }> => {
+    setIsSyncingSheets(true);
+    try {
+      // 1. Try server sync endpoint
+      const serverRes = await fetch('/api/users/sync-sheet');
+      if (serverRes.ok) {
+        const data = await serverRes.json();
+        if (data.success && Array.isArray(data.users) && data.users.length > 0) {
+          const cleaned = mergeWithMasterUser(data.users);
+          setUsers(cleaned);
+          localStorage.setItem(`${LOCAL_STORAGE_KEY_PREFIX}users`, JSON.stringify(cleaned));
+          publishGlobalSystemState({ users: cleaned });
+          return {
+            success: true,
+            message: `${cleaned.length} colaboradores oficiais sincronizados da aba Usuários (GID 2018208122)!`,
+            count: cleaned.length,
+            users: cleaned,
+          };
+        }
+      }
+    } catch {}
+
+    // 2. Direct GViz fetch fallback
+    try {
+      const res = await fetchSheetUsers();
+      if (res.success && res.users.length > 0) {
+        const cleaned = mergeWithMasterUser(res.users);
+        setUsers(cleaned);
+        localStorage.setItem(`${LOCAL_STORAGE_KEY_PREFIX}users`, JSON.stringify(cleaned));
+        publishGlobalSystemState({ users: cleaned });
+        return {
+          success: true,
+          message: `${cleaned.length} colaboradores oficiais sincronizados diretamente da planilha!`,
+          count: cleaned.length,
+          users: cleaned,
+        };
+      }
+    } catch (err: any) {
+      console.warn('Erro ao sincronizar usuários:', err);
+    } finally {
+      setIsSyncingSheets(false);
+    }
+
+    const cleaned = mergeWithMasterUser(users);
+    setUsers(cleaned);
+    return {
+      success: true,
+      message: `Lista de colaboradores atualizada (${cleaned.length} oficiais, sem contas de demonstração).`,
+      count: cleaned.length,
+      users: cleaned,
+    };
   };
 
   const loginCorporateUser = async (
@@ -1451,6 +1568,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return { success: true, message: 'Senha mestra alterada com sucesso!' };
   };
 
+  // Immediate purge of any obsolete mock orders from localStorage/state on startup
+  useEffect(() => {
+    setOrders((prev) => {
+      const cleaned = prev.filter((o) => !isLegacyMockOrder(o));
+      if (cleaned.length !== prev.length) {
+        localStorage.setItem(`${LOCAL_STORAGE_KEY_PREFIX}orders`, JSON.stringify(cleaned));
+        return cleaned;
+      }
+      return prev;
+    });
+  }, []);
+
   // Google Sheets Live Integration Actions
   const syncWithGoogleSheet = async (
     sheetUrlOrId?: string,
@@ -1464,8 +1593,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (result.success && result.orders.length > 0) {
         setOrders((prev) => {
           const existingMap = new Map<string, ServiceOrder>();
-          // Index existing orders by their unique ID
-          prev.forEach((o) => existingMap.set(o.id, o));
+          // Index existing orders, discarding any legacy mock dummy records
+          prev
+            .filter((o) => !isLegacyMockOrder(o))
+            .forEach((o) => existingMap.set(o.id, o));
 
           result.orders.forEach((newOrd) => {
             const existing = existingMap.get(newOrd.id);
@@ -1486,7 +1617,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             }
           });
 
-          const merged = Array.from(existingMap.values());
+          const merged = Array.from(existingMap.values()).filter((o) => !isLegacyMockOrder(o));
           // Sync merged to server state so all clients get it
           fetch('/api/state', {
             method: 'POST',
@@ -1762,6 +1893,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         orders,
         invoices,
         syncWithGoogleSheet,
+        syncUsersWithGoogleSheet,
         importRawSheetData,
         pushOrdersToGoogleSheet,
         isSyncingSheets,

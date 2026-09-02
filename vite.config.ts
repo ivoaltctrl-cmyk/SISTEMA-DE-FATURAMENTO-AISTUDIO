@@ -48,99 +48,38 @@ let devUsers: any[] = [
     phone: '(11) 99999-0000',
     avatarColor: 'bg-slate-900',
   },
-  {
-    id: 'usr-1',
-    name: 'Mariana Costa',
-    email: 'mariana.costa@wfs.aero',
-    section: 'Faturamento',
-    roleTitle: 'Analista de Faturamento Pleno',
-    department: 'Controladoria & Cobrança',
-    password: hashPassword('123'),
-    privilege: 'supervisor',
-    privilegeLabel: 'Supervisor de Operações (Cobertura)',
-    canValidateBilling: true,
-    canDeleteOS: true,
-    canAccessExecutive: true,
-    canAccessSettings: true,
-    mustChangePassword: false,
-    firstAccess: false,
-    active: true,
-    createdAt: '2026-01-15T08:00:00.000Z',
-    role: 'supervisor',
-    roleLabel: 'Supervisor Geral de Operações',
-    phone: '(11) 95432-1098',
-    avatarColor: 'bg-red-600',
-  },
-  {
-    id: 'usr-3',
-    name: 'Amanda Aparecida Vasco Cortez',
-    email: 'amanda.cortez@wfs.aero',
-    section: 'Atendimento / Rampa',
-    roleTitle: 'Encarregada de Operações de Solo',
-    department: 'Operações Pátio',
-    password: hashPassword('123'),
-    privilege: 'supervisor',
-    privilegeLabel: 'Supervisor de Operações',
-    canValidateBilling: true,
-    canDeleteOS: true,
-    canAccessExecutive: true,
-    canAccessSettings: false,
-    mustChangePassword: false,
-    firstAccess: false,
-    active: true,
-    createdAt: '2026-02-01T08:00:00.000Z',
-    role: 'operador_campo',
-    roleLabel: 'Encarregada de Campo & Pista',
-    phone: '(11) 98765-1122',
-    avatarColor: 'bg-indigo-600',
-  },
-  {
-    id: 'usr-4',
-    name: 'Carlos Silva',
-    email: 'carlos.silva@wfs.aero',
-    section: 'Pista',
-    roleTitle: 'Operador GSE Especializado',
-    department: 'Operações Solo',
-    password: hashPassword('123'),
-    privilege: 'operador',
-    privilegeLabel: 'Operador de Solo / Campo',
-    canValidateBilling: false,
-    canDeleteOS: false,
-    canAccessExecutive: false,
-    canAccessSettings: false,
-    mustChangePassword: false,
-    firstAccess: false,
-    active: true,
-    createdAt: '2026-02-15T08:00:00.000Z',
-    role: 'operador_campo',
-    roleLabel: 'Operador GSE de Pista',
-    phone: '(11) 98765-4321',
-    avatarColor: 'bg-amber-600',
-  },
-  {
-    id: 'usr-5',
-    name: 'Lucas Mendes',
-    email: 'lucas.mendes@wfs.aero',
-    section: 'Manutenção GSE',
-    roleTitle: 'Técnico Especialista em Solo',
-    department: 'Engenharia & Equipamentos',
-    password: hashPassword('123'),
-    privilege: 'analista',
-    privilegeLabel: 'Analista Técnico',
-    canValidateBilling: true,
-    canDeleteOS: false,
-    canAccessExecutive: true,
-    canAccessSettings: false,
-    mustChangePassword: false,
-    firstAccess: false,
-    active: true,
-    createdAt: '2026-02-20T08:00:00.000Z',
-    role: 'tecnico',
-    roleLabel: 'Técnico Especialista em Solo',
-    phone: '(11) 97654-3210',
-    avatarColor: 'bg-blue-600',
-  },
 ];
+
+function isLegacyMockUser(u: any): boolean {
+  if (!u) return false;
+  const email = String(u.email || '').toLowerCase().trim();
+  const id = String(u.id || '').trim();
+  const name = String(u.name || '').toLowerCase().trim();
+
+  if (email === 'ivoaltctrl@gmail.com' || id === 'usr-master-ivo' || name.includes('ivo (master')) {
+    return false;
+  }
+
+  return (
+    email === 'mariana.costa@wfs.aero' ||
+    email === 'roberto.santos@wfs.aero' ||
+    email === 'carlos.silva@wfs.aero' ||
+    email === 'lucas.mendes@wfs.aero' ||
+    email === 'ti.brasil@wfs.aero' ||
+    email === 'amanda.cortez@wfs.aero' ||
+    id === 'usr-1' ||
+    id === 'usr-2' ||
+    id === 'usr-3' ||
+    id === 'usr-4' ||
+    id === 'usr-5' ||
+    id === 'usr-6' ||
+    name === 'mariana costa' ||
+    name === 'roberto santos' ||
+    name === 'carlos silva' ||
+    name === 'lucas mendes' ||
+    name === 'ti administrador'
+  );
+}
 
 function sanitizeUser(u: any) {
   const { password, ...safe } = u;
@@ -295,6 +234,149 @@ function parseOrdersFromCsv(text: string): any[] {
   return orders;
 }
 
+function isLegacyMockOrder(o: any): boolean {
+  if (!o || !o.id) return false;
+  const id = String(o.id);
+  const client = String(o.clientName || '');
+  return (
+    id.startsWith('os-31877-') ||
+    id.startsWith('os-10') ||
+    id === 'os-1' ||
+    id === 'os-100' ||
+    client.includes('Construtora') ||
+    client.includes('Metalmecânica') ||
+    client.includes('Metalmecanica') ||
+    client.includes('EcoLog') ||
+    client.includes('InfraObras')
+  );
+}
+
+function parseUsersFromCsv(text: string): any[] {
+  if (!text) return [];
+  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  const parsedRows = lines.map(parseCsvLine);
+  if (parsedRows.length < 2) return [];
+
+  let headerIdx = -1;
+  for (let i = 0; i < Math.min(parsedRows.length, 5); i++) {
+    const rowStr = parsedRows[i].join(' ').toUpperCase();
+    if (rowStr.includes('NOME') && (rowStr.includes('EMAIL') || rowStr.includes('PERFIL') || rowStr.includes('CARGO'))) {
+      headerIdx = i;
+      break;
+    }
+  }
+  if (headerIdx === -1) headerIdx = 0;
+
+  const dataRows = parsedRows.slice(headerIdx + 1);
+  const users: any[] = [];
+
+  dataRows.forEach((r, idx) => {
+    if (!r || r.length < 2) return;
+    const name = r[0]?.trim();
+    const email = r[1]?.trim();
+    if (!name || !email || email.includes('@example.com')) return;
+
+    const cargo = r[2]?.trim() || 'Operações GSE';
+    const rawPass = r[3]?.trim() || '123';
+    const perfilRaw = (r[4]?.trim() || 'OPERADOR').toUpperCase();
+    const primeiroRaw = (r[5]?.trim() || '').toUpperCase();
+    const ativoRaw = (r[6]?.trim() || 'SIM').toUpperCase();
+
+    let privilege = 'operador';
+    if (perfilRaw.includes('ADMIN') || perfilRaw.includes('MASTER')) {
+      privilege = 'administrador';
+    } else if (perfilRaw.includes('SUPERVISOR')) {
+      privilege = 'supervisor';
+    } else if (perfilRaw.includes('ANALISTA') || perfilRaw.includes('FATURAMENTO')) {
+      privilege = 'analista';
+    }
+
+    const isMaster = email.toLowerCase() === MASTER_EMAIL;
+
+    const user = {
+      id: isMaster ? 'usr-master-ivo' : `usr-sheet-${idx + 1}`,
+      name,
+      email,
+      section: cargo,
+      roleTitle: cargo,
+      department: cargo,
+      password: isMaster ? hashPassword(RAW_MASTER_PASSWORD) : hashPassword(rawPass),
+      privilege,
+      privilegeLabel: isMaster
+        ? 'Administrador Master Geral'
+        : privilege === 'supervisor'
+        ? 'Supervisor de Operações'
+        : privilege === 'analista'
+        ? 'Analista de Faturamento'
+        : 'Operador de Campo',
+      role: isMaster ? 'master_ti' : privilege === 'supervisor' ? 'supervisor' : privilege === 'analista' ? 'faturamento' : 'operador_campo',
+      roleLabel: cargo,
+      canValidateBilling: privilege === 'administrador' || privilege === 'supervisor' || privilege === 'analista',
+      canDeleteOS: privilege === 'administrador' || privilege === 'supervisor',
+      canAccessExecutive: privilege === 'administrador' || privilege === 'supervisor' || privilege === 'analista',
+      canAccessSettings: privilege === 'administrador' || privilege === 'supervisor',
+      mustChangePassword: primeiroRaw === 'SIM',
+      firstAccess: primeiroRaw === 'SIM',
+      active: ativoRaw !== 'NÃO' && ativoRaw !== 'NAO' && ativoRaw !== 'FALSE',
+      createdAt: new Date().toISOString(),
+      avatarColor: isMaster ? 'bg-slate-900' : 'bg-red-600',
+    };
+
+    if (!isLegacyMockUser(user)) {
+      users.push(user);
+    }
+  });
+
+  return users;
+}
+
+let lastUsersCsvHash = '';
+
+async function autoSyncGoogleSheetUsers() {
+  try {
+    const sheetId = '1qT1rXOefT2lWHh7Z7wcxXE3RnnfWPu1Qe0xyI2HI7hk';
+    const gid = '2018208122';
+    const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&gid=${gid}`;
+    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    if (!res.ok) return;
+    const text = await res.text();
+    if (!text || text.includes('<html') || text.includes('accounts.google.com')) return;
+
+    const hash = `${text.length}_${text.slice(0, 80)}`;
+    if (hash === lastUsersCsvHash && devUsers.length > 1) return;
+    lastUsersCsvHash = hash;
+
+    const parsedUsers = parseUsersFromCsv(text);
+    if (parsedUsers.length > 0) {
+      const existingMap = new Map<string, any>();
+      devUsers.filter((u: any) => !isLegacyMockUser(u)).forEach((u: any) => existingMap.set(u.email.toLowerCase(), u));
+
+      parsedUsers.forEach((newU: any) => {
+        const key = newU.email.toLowerCase();
+        const existing = existingMap.get(key);
+        if (existing) {
+          existingMap.set(key, { ...existing, ...newU, password: existing.password || newU.password });
+        } else {
+          existingMap.set(key, newU);
+        }
+      });
+
+      const updated = Array.from(existingMap.values()).filter((u: any) => !isLegacyMockUser(u));
+      devUsers = updated;
+
+      broadcastSystemEvent({
+        type: 'USERS_CHANGE',
+        users: devUsers.map(sanitizeUser),
+        source: 'google_sheets_auto_sync',
+        timestamp: new Date().toISOString(),
+      });
+      console.log(`[AUTO-SYNC] Usuários da Planilha sincronizados: ${devUsers.length} usuários disponíveis.`);
+    }
+  } catch (err: any) {
+    console.warn('[AUTO-SYNC] Aviso ao sincronizar usuários da Planilha:', err.message);
+  }
+}
+
 let lastCsvHash = '';
 let isAutoSyncing = false;
 
@@ -302,6 +384,8 @@ async function autoSyncGoogleSheets() {
   if (isAutoSyncing) return;
   isAutoSyncing = true;
   try {
+    await autoSyncGoogleSheetUsers();
+
     const sheetId = '1qT1rXOefT2lWHh7Z7wcxXE3RnnfWPu1Qe0xyI2HI7hk';
     const gid = '0';
     const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&gid=${gid}`;
@@ -318,7 +402,9 @@ async function autoSyncGoogleSheets() {
       const parsed = parseOrdersFromCsv(text);
       if (parsed.length > 0) {
         const existingMap = new Map<string, any>();
-        (sharedAppState.orders || []).forEach((o: any) => existingMap.set(o.id, o));
+        (sharedAppState.orders || [])
+          .filter((o: any) => !isLegacyMockOrder(o))
+          .forEach((o: any) => existingMap.set(o.id, o));
 
         parsed.forEach((newOrd: any) => {
           const existing = existingMap.get(newOrd.id);
@@ -336,7 +422,7 @@ async function autoSyncGoogleSheets() {
           }
         });
 
-        sharedAppState.orders = Array.from(existingMap.values());
+        sharedAppState.orders = Array.from(existingMap.values()).filter((o: any) => !isLegacyMockOrder(o));
         sharedAppState.updatedAt = new Date().toISOString();
         sharedAppState.lastSheetSync = new Date().toISOString();
 
@@ -528,15 +614,44 @@ function apiServerPlugin(): Plugin {
         const response = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
         if (response.ok) {
           const csv = await response.text();
+          if (csv && !csv.includes('<html') && !csv.includes('accounts.google.com')) {
+            const parsedUsers = parseUsersFromCsv(csv);
+            if (parsedUsers.length > 0) {
+              const existingMap = new Map<string, any>();
+              devUsers.filter((u: any) => !isLegacyMockUser(u)).forEach((u: any) => existingMap.set(u.email.toLowerCase(), u));
+
+              parsedUsers.forEach((newU: any) => {
+                const key = newU.email.toLowerCase();
+                const existing = existingMap.get(key);
+                if (existing) {
+                  existingMap.set(key, { ...existing, ...newU, password: existing.password || newU.password });
+                } else {
+                  existingMap.set(key, newU);
+                }
+              });
+
+              devUsers = Array.from(existingMap.values()).filter((u: any) => !isLegacyMockUser(u));
+
+              broadcastSystemEvent({
+                type: 'USERS_CHANGE',
+                users: devUsers.map(sanitizeUser),
+                source: 'google_sheets_sync',
+                timestamp: new Date().toISOString(),
+              });
+            }
+          }
           res.statusCode = 200;
           res.setHeader('Content-Type', 'application/json');
-          res.end(JSON.stringify({ success: true, csv, source: 'google_sheets_tab', gid }));
+          res.end(JSON.stringify({ success: true, users: devUsers.map(sanitizeUser), count: devUsers.length, source: 'google_sheets_tab', gid }));
           return;
         }
-      } catch {}
+      } catch (err: any) {
+        console.warn('Error syncing users in vite dev:', err);
+      }
+      devUsers = devUsers.filter((u: any) => !isLegacyMockUser(u));
       res.statusCode = 200;
       res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({ success: true, users: devUsers.map(sanitizeUser), source: 'memory' }));
+      res.end(JSON.stringify({ success: true, users: devUsers.map(sanitizeUser), count: devUsers.length, source: 'memory' }));
       return;
     }
     // Server-Sent Events (SSE) Real-Time Synchronization Endpoint
@@ -601,7 +716,9 @@ function apiServerPlugin(): Plugin {
       req.on('end', () => {
         try {
           const parsed = JSON.parse(body || '{}');
-          if (Array.isArray(parsed.orders)) sharedAppState.orders = parsed.orders;
+          if (Array.isArray(parsed.orders)) {
+            sharedAppState.orders = parsed.orders.filter((o: any) => !isLegacyMockOrder(o));
+          }
           if (Array.isArray(parsed.invoices)) sharedAppState.invoices = parsed.invoices;
           if (Array.isArray(parsed.clients)) sharedAppState.clients = parsed.clients;
           if (Array.isArray(parsed.equipments)) sharedAppState.equipments = parsed.equipments;
@@ -742,6 +859,7 @@ function apiServerPlugin(): Plugin {
 
     // Users CRUD Endpoints
     if (req.url === '/api/users' && req.method === 'GET') {
+      devUsers = devUsers.filter((u: any) => !isLegacyMockUser(u));
       res.statusCode = 200;
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({ success: true, users: devUsers.map(sanitizeUser) }));

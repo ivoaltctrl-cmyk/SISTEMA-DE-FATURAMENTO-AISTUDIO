@@ -1,4 +1,5 @@
-import { ServiceOrder, Invoice, Client, OSStatus, ServiceTypeCategory } from '../types';
+import { ServiceOrder, Invoice, Client, OSStatus, ServiceTypeCategory, AppUser, UserPrivilege } from '../types';
+import { isLegacyMockUser } from './cloudSyncService';
 
 export const OFFICIAL_SHEET_URL =
   'https://docs.google.com/spreadsheets/d/1qT1rXOefT2lWHh7Z7wcxXE3RnnfWPu1Qe0xyI2HI7hk/edit?gid=0#gid=0';
@@ -811,6 +812,141 @@ export const fetchOrdersFromGoogleSheet = async (
       'A planilha do Google está configurada como "Restrita" ou inacessível sem login. Para sincronizar automaticamente: abra a planilha no Google Sheets -> Compartilhar -> "Qualquer pessoa com o link" (Leitor). Ou clique no botão ao lado para Colar os dados.',
     orders: [],
   };
+};
+
+// Convert parsed CSV rows from Aba "Usuários" (GID 2018208122) into AppUser[]
+export const parseSheetRowsToUsers = (rows: string[][]): AppUser[] => {
+  if (!rows || rows.length < 2) return [];
+
+  // Find header row containing NOME and (EMAIL or PERFIL)
+  let headerIndex = -1;
+  for (let i = 0; i < Math.min(rows.length, 5); i++) {
+    const rowStr = rows[i].join(' ').toUpperCase();
+    if (rowStr.includes('NOME') && (rowStr.includes('EMAIL') || rowStr.includes('PERFIL'))) {
+      headerIndex = i;
+      break;
+    }
+  }
+  if (headerIndex === -1) headerIndex = 0;
+
+  const header = rows[headerIndex].map((h) => normalizeString(h));
+  const colNome = header.findIndex((h) => h.includes('nome'));
+  const colEmail = header.findIndex((h) => h.includes('email') || h.includes('e-mail'));
+  const colCargo = header.findIndex((h) => h.includes('cargo') || h.includes('setor') || h.includes('funcao'));
+  const colSenha = header.findIndex((h) => h.includes('senha'));
+  const colPerfil = header.findIndex((h) => h.includes('perfil') || h.includes('privilegio'));
+  const colPrimeiro = header.findIndex((h) => h.includes('primeiro') || h.includes('acesso'));
+  const colAtivo = header.findIndex((h) => h.includes('ativo') || h.includes('status'));
+
+  const users: AppUser[] = [];
+  for (let i = headerIndex + 1; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r || r.length < 2) continue;
+
+    const name = (colNome !== -1 ? r[colNome] : r[0])?.trim();
+    const email = (colEmail !== -1 ? r[colEmail] : r[1])?.trim();
+
+    if (!name || !email || email.includes('@example.com')) continue;
+
+    const cargo = (colCargo !== -1 ? r[colCargo] : r[2])?.trim() || 'Operações';
+    const senha = (colSenha !== -1 ? r[colSenha] : r[3])?.trim() || '123';
+    const perfilRaw = ((colPerfil !== -1 ? r[colPerfil] : r[4])?.trim() || 'OPERADOR').toUpperCase();
+    const primeiroRaw = ((colPrimeiro !== -1 ? r[colPrimeiro] : r[5])?.trim() || '').toUpperCase();
+    const ativoRaw = ((colAtivo !== -1 ? r[colAtivo] : r[6])?.trim() || 'SIM').toUpperCase();
+
+    let privilege: UserPrivilege = 'operador';
+    if (perfilRaw.includes('ADMIN') || perfilRaw.includes('MASTER')) {
+      privilege = 'administrador';
+    } else if (perfilRaw.includes('SUPERVISOR')) {
+      privilege = 'supervisor';
+    } else if (perfilRaw.includes('ANALISTA') || perfilRaw.includes('FATURAMENTO')) {
+      privilege = 'analista';
+    } else {
+      privilege = 'operador';
+    }
+
+    const isMaster = email.toLowerCase() === 'ivoaltctrl@gmail.com';
+
+    const user: AppUser = {
+      id: isMaster ? 'usr-master-ivo' : `usr-sheet-${i}`,
+      name,
+      email,
+      section: cargo,
+      roleTitle: cargo,
+      department: cargo,
+      password: isMaster ? 'admin' : senha,
+      privilege: isMaster ? 'administrador' : privilege,
+      privilegeLabel: isMaster ? 'Administrador Master Geral' : privilege === 'supervisor' ? 'Supervisor de Operações' : privilege === 'analista' ? 'Analista de Faturamento' : 'Operador de Campo',
+      canValidateBilling: privilege === 'administrador' || privilege === 'supervisor' || privilege === 'analista',
+      canDeleteOS: privilege === 'administrador' || privilege === 'supervisor',
+      canAccessExecutive: privilege === 'administrador' || privilege === 'supervisor' || privilege === 'analista',
+      canAccessSettings: privilege === 'administrador' || privilege === 'supervisor',
+      mustChangePassword: primeiroRaw === 'SIM',
+      firstAccess: primeiroRaw === 'SIM',
+      active: ativoRaw !== 'NÃO' && ativoRaw !== 'NAO' && ativoRaw !== 'FALSE',
+      createdAt: new Date().toISOString(),
+      role: privilege === 'administrador' ? 'master_ti' : privilege === 'supervisor' ? 'supervisor' : privilege === 'analista' ? 'faturamento' : 'operador_campo',
+      avatarColor: isMaster ? 'bg-slate-900' : 'bg-red-600',
+    };
+
+    if (!isLegacyMockUser(user)) {
+      users.push(user);
+    }
+  }
+
+  return users;
+};
+
+// Fetch real authorized users from Google Sheets "Usuários" tab (GID 2018208122)
+export const fetchSheetUsers = async (): Promise<{
+  success: boolean;
+  users: AppUser[];
+  error?: string;
+  source: string;
+}> => {
+  const sheetId = OFFICIAL_SHEET_ID;
+  const gid = OFFICIAL_USERS_SHEET_GID;
+
+  // 1. Try backend proxy sync endpoint
+  try {
+    const res = await fetch('/api/users/sync-sheet');
+    if (res.ok) {
+      const data = await res.json();
+      if (data.success && Array.isArray(data.users) && data.users.length > 0) {
+        return {
+          success: true,
+          users: data.users.filter((u: any) => !isLegacyMockUser(u)),
+          source: 'backend_proxy',
+        };
+      }
+    }
+  } catch {}
+
+  // 2. Try direct Google GViz fetch
+  const directUrls = [
+    `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&gid=${gid}`,
+    `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(OFFICIAL_USERS_SHEET_NAME)}`,
+  ];
+
+  for (const url of directUrls) {
+    try {
+      const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, cache: 'no-store' });
+      if (res.ok) {
+        const text = await res.text();
+        if (text && text.trim().length > 0 && !text.includes('<html')) {
+          const rows = parseCSVToRows(text);
+          const users = parseSheetRowsToUsers(rows);
+          if (users.length > 0) {
+            return { success: true, users, source: 'google_sheets_direct' };
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('Erro ao buscar aba Usuários:', err);
+    }
+  }
+
+  return { success: false, users: [], error: 'Não foi possível carregar os usuários da planilha.', source: 'failed' };
 };
 
 // Sync orders back to Google Sheets via Webhook or prepare export
