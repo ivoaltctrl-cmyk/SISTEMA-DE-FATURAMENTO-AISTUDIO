@@ -1,0 +1,8 @@
+{
+  "name": "OS Digital - Gestão de Serviços, Locação e Faturamento",
+  "description": "Sistema completo para digitalização de Ordens de Serviço (OS), locação de equipamentos, mão de obra com assinatura digital no campo e faturamento ágil.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
