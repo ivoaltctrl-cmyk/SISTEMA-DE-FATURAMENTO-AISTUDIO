@@ -128,7 +128,7 @@ export const FieldPortal: React.FC<FieldPortalProps> = ({
         <div className="max-w-4xl mx-auto flex items-center justify-between">
           {/* Logo & Portal Identity */}
           <div className="flex items-center gap-3">
-            <WFSLogo size="sm" variant="color" />
+            <WFSLogo size="sm" />
             <div className="hidden sm:block border-l border-slate-200 pl-3">
               <span className="text-[10px] font-black uppercase tracking-widest text-amber-900 bg-amber-100 px-2 py-0.5 rounded border border-amber-300">
                 ⚡ Modo Campo & Pista

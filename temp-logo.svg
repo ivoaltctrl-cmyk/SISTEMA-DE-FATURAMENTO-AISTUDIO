@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 500" width="2000" height="1000">
+  <defs>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@700;800;900&amp;display=swap');
+      .logo-red { fill: #E31B23; }
+      .brand-text { font-family: 'Montserrat', 'Arial Black', sans-serif; font-weight: 800; fill: #E31B23; }
+      .sub-text { font-family: 'Montserrat', 'Arial', sans-serif; font-weight: 700; fill: #E31B23; letter-spacing: 4px; }
+    </style>
+  </defs>
+  
+  <!-- WFS Emblem -->
+  <g transform="translate(80, 75) scale(0.7)">
+    <!-- Outer primary swirl -->
+    <path class="logo-red" d="M240,40 C350.46,40 440,129.54 440,240 C440,350.46 350.46,440 240,440 C129.54,440 40,350.46 40,240 C40,195 55,153 82,120 C76,140 73,161 73,183 C73,275 148,350 240,350 C332,350 407,275 407,183 C407,125 377,74 332,45 C304,39 273,36 240,40 Z" />
+    <!-- Secondary internal swirl wave forming the signature eye/vortex -->
+    <path class="logo-red" d="M240,110 C168.2,110 110,168.2 110,240 C110,311.8 168.2,370 240,370 C280,370 316,352 340,324 C318,337 292,345 264,345 C197,345 143,291 143,224 C143,157 197,103 264,103 C288,103 310,110 329,122 C304,114 274,110 240,110 Z" />
+    <path class="logo-red" d="M260,160 C215.8,160 180,195.8 180,240 C180,284.2 215.8,320 260,320 C290,320 316,303 328,278 C312,284 294,287 275,287 C234,287 200,253 200,212 C200,181 219,155 246,145 C250,150 255,155 260,160 Z" />
+  </g>
+
+  <!-- Wordmark 'wfs' -->
+  <g transform="translate(450, 270)">
+    <text class="brand-text" font-size="200" letter-spacing="-5px">wfs</text>
+  </g>
+
+  <!-- Subtitle 'A SATS COMPANY' -->
+  <g transform="translate(465, 335)">
+    <text class="sub-text" font-size="34">A SATS COMPANY</text>
+  </g>
+</svg>

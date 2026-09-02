@@ -87,7 +87,7 @@ export const MaintenanceLockScreen: React.FC = () => {
       {/* Top Header */}
       <header className="relative z-10 max-w-4xl w-full mx-auto flex items-center justify-between py-3 border-b border-slate-200">
         <div className="flex items-center gap-3">
-          <WFSLogo size="sm" variant="color" />
+          <WFSLogo size="sm" />
           <div className="border-l border-slate-200 pl-3">
             <span className="text-[11px] tracking-wider text-red-600 uppercase font-black">
               STATUS: FECHADO / OFFLINE NA NUVEM

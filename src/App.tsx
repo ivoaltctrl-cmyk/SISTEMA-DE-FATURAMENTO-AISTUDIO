@@ -381,7 +381,7 @@ const MainApp: React.FC = () => {
               onClick={() => setActiveTab('dashboard')}
               className="flex items-center gap-2.5 cursor-pointer group"
             >
-              <WFSLogo size="sm" variant="color" />
+              <WFSLogo size="sm" />
               <div className="hidden sm:block border-l border-slate-200 pl-2.5">
                 <span className="font-black text-xs tracking-tight text-slate-900 flex items-center gap-1.5">
                   Painel Executivo & Faturamento
@@ -566,7 +566,7 @@ const MainApp: React.FC = () => {
             <div className="bg-white w-72 h-full p-5 flex flex-col justify-between shadow-2xl">
               <div className="space-y-4">
                 <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-                  <WFSLogo size="sm" variant="color" />
+                  <WFSLogo size="sm" />
                   <button
                     type="button"
                     onClick={() => setMobileMenuOpen(false)}

@@ -48,7 +48,7 @@ export const PrintableOS: React.FC<PrintableOSProps> = ({ order, onBack }) => {
         {/* Header */}
         <div className="flex flex-col sm:flex-row justify-between items-start border-b-2 border-slate-900 pb-6 gap-4">
           <div className="space-y-1">
-            <WFSLogo size="md" variant="color" />
+            <WFSLogo size="md" />
             <p className="text-xs font-semibold text-slate-700 mt-2">{company.name}</p>
             <p className="text-[11px] text-slate-500 mt-0.5">
               CNPJ: {formatDocument(company.cnpj)}{' '}

@@ -199,7 +199,7 @@ export const MasterGovernancePortal: React.FC<MasterGovernancePortalProps> = ({
       <header className="bg-white border-b border-slate-200 sticky top-0 z-30 px-4 sm:px-8 py-3.5 shadow-xs">
         <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <WFSLogo size="sm" variant="color" />
+            <WFSLogo size="sm" />
             <div className="border-l border-slate-200 pl-3">
               <div className="flex items-center gap-2">
                 <span className="text-xs font-black tracking-wider text-slate-900 uppercase flex items-center gap-1.5">

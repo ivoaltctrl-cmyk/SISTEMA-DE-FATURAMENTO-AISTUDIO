@@ -150,7 +150,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         {/* Logo & Header */}
         <div className="text-center space-y-3">
           <div className="flex justify-center">
-            <WFSLogo size="md" variant="color" />
+            <WFSLogo size="md" />
           </div>
 
           {!isFirstAccessMode ? (
