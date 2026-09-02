@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import {
   AppUser,
   Client,
@@ -57,11 +57,13 @@ interface AppContextType {
   orders: ServiceOrder[];
   invoices: Invoice[];
   
-  // Google Sheets Sincronização & Importação em Tempo Real
-  syncWithGoogleSheet: (sheetUrlOrId?: string) => Promise<{ success: boolean; message: string; count: number }>;
+  // Google Sheets Sincronização & Importação em Tempo Real (Automática & Bidirecional)
+  syncWithGoogleSheet: (sheetUrlOrId?: string, isBackground?: boolean) => Promise<{ success: boolean; message: string; count: number }>;
   importRawSheetData: (rawText: string) => { success: boolean; message: string; count: number };
   pushOrdersToGoogleSheet: (webhookUrl?: string) => Promise<{ success: boolean; message: string }>;
   isSyncingSheets: boolean;
+  lastAutoSyncTime: Date | null;
+  isAutoSyncActive: boolean;
   
   // User Management & Active Operator
   users: AppUser[];
@@ -248,6 +250,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [isSessionUnlocked, setIsSessionUnlocked] = useState<boolean>(false);
   const [isExecutiveUnlocked, setIsExecutiveUnlocked] = useState<boolean>(false);
   const [isSyncingSheets, setIsSyncingSheets] = useState<boolean>(false);
+  const [lastAutoSyncTime, setLastAutoSyncTime] = useState<Date | null>(new Date());
+  const isAutoSyncActive = true;
+
+  // Synchronization refs to prevent infinite loopback updates
+  const isRemoteOrdersUpdateRef = useRef<boolean>(false);
+  const isRemoteInvoicesUpdateRef = useRef<boolean>(false);
+  const bcRef = useRef<BroadcastChannel | null>(null);
 
   const [selectedOrderForDetail, setSelectedOrderForDetail] = useState<ServiceOrder | null>(null);
   const [selectedOrderForFieldMode, setSelectedOrderForFieldMode] = useState<ServiceOrder | null>(null);
@@ -284,10 +293,54 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (cfg.autoSync && cfg.webhookUrl) {
       syncOrdersWithGoogleSheets(orders).catch(() => {});
     }
+
+    if (isRemoteOrdersUpdateRef.current) {
+      isRemoteOrdersUpdateRef.current = false;
+      return;
+    }
+
+    // Local change by this user: broadcast immediately to other browser tabs (0ms)
+    if (bcRef.current) {
+      try {
+        bcRef.current.postMessage({
+          type: 'LOCAL_ORDERS_UPDATE',
+          orders,
+          timestamp: Date.now(),
+        });
+      } catch {}
+    }
+
+    // Push to server state so all other users on any device receive the SSE event immediately (<50ms)
+    fetch('/api/state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ orders }),
+    }).catch(() => {});
   }, [orders]);
 
   useEffect(() => {
     localStorage.setItem(`${LOCAL_STORAGE_KEY_PREFIX}invoices`, JSON.stringify(invoices));
+
+    if (isRemoteInvoicesUpdateRef.current) {
+      isRemoteInvoicesUpdateRef.current = false;
+      return;
+    }
+
+    if (bcRef.current) {
+      try {
+        bcRef.current.postMessage({
+          type: 'LOCAL_INVOICES_UPDATE',
+          invoices,
+          timestamp: Date.now(),
+        });
+      } catch {}
+    }
+
+    fetch('/api/state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ invoices }),
+    }).catch(() => {});
   }, [invoices]);
 
   useEffect(() => {
@@ -298,7 +351,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     localStorage.setItem(`${LOCAL_STORAGE_KEY_PREFIX}master_pwd`, masterPassword);
   }, [masterPassword]);
 
-  // Real-time synchronization with server state & maintenance status (SSE + BroadcastChannel + Fast Polling)
+  // Real-time synchronization with server state & maintenance status (SSE + BroadcastChannel + Auto-sync)
   useEffect(() => {
     let eventSource: EventSource | null = null;
     let bc: BroadcastChannel | null = null;
@@ -341,7 +394,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // 1. Carrega todas as OSs reais do Servidor/Planilha (GET /api/ordens)
         const ordensRes = await ordensApi.getAll();
         if (ordensRes.success && Array.isArray(ordensRes.orders) && ordensRes.orders.length > 0) {
+          isRemoteOrdersUpdateRef.current = true;
           setOrders(ordensRes.orders);
+          setLastAutoSyncTime(new Date());
         }
       } catch (err) {
         console.warn('GET /api/ordens fallback:', err);
@@ -381,8 +436,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
 
           if (data.type === 'STATE_CHANGE' && data.appState) {
-            if (Array.isArray(data.appState.orders)) setOrders(data.appState.orders);
-            if (Array.isArray(data.appState.invoices)) setInvoices(data.appState.invoices);
+            if (Array.isArray(data.appState.orders)) {
+              isRemoteOrdersUpdateRef.current = true;
+              setOrders(data.appState.orders);
+              setLastAutoSyncTime(new Date());
+            }
+            if (Array.isArray(data.appState.invoices)) {
+              isRemoteInvoicesUpdateRef.current = true;
+              setInvoices(data.appState.invoices);
+            }
             if (data.appState.company) setCompanyState(data.appState.company);
           }
         } catch (parseErr) {
@@ -401,6 +463,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       if (typeof BroadcastChannel !== 'undefined') {
         bc = new BroadcastChannel('wfs_system_sync');
+        bcRef.current = bc;
         bc.onmessage = (ev) => {
           if (ev.data?.type === 'MAINTENANCE_CHANGE' && typeof ev.data.isMaintenanceMode === 'boolean') {
             applyMaintenanceState(ev.data.isMaintenanceMode);
@@ -411,18 +474,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             if (Array.isArray(ev.data.state.users)) {
               setUsers(mergeWithMasterUser(ev.data.state.users));
             }
+          } else if (ev.data?.type === 'LOCAL_ORDERS_UPDATE' && Array.isArray(ev.data.orders)) {
+            isRemoteOrdersUpdateRef.current = true;
+            setOrders(ev.data.orders);
+            setLastAutoSyncTime(new Date());
+          } else if (ev.data?.type === 'LOCAL_INVOICES_UPDATE' && Array.isArray(ev.data.invoices)) {
+            isRemoteInvoicesUpdateRef.current = true;
+            setInvoices(ev.data.invoices);
           }
         };
       }
     } catch {}
 
-    // 4. Multi-tier Cloud Polling every 2.5s to guarantee 100% synchronization on all browsers/devices
-    const interval = setInterval(syncAllTiers, 2500);
+    // 4. Polling check for operational maintenance mode status every 5s
+    const interval = setInterval(syncAllTiers, 5000);
+
+    // 5. Automatic periodic background Google Sheets sync every 20s (without blocking UI)
+    const autoSyncTimer = setInterval(() => {
+      syncWithGoogleSheet(undefined, true).catch(() => {});
+    }, 20000);
 
     return () => {
       if (eventSource) eventSource.close();
       if (bc) bc.close();
+      bcRef.current = null;
       clearInterval(interval);
+      clearInterval(autoSyncTimer);
     };
   }, []);
 
@@ -1376,9 +1453,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Google Sheets Live Integration Actions
   const syncWithGoogleSheet = async (
-    sheetUrlOrId?: string
+    sheetUrlOrId?: string,
+    isBackground: boolean = false
   ): Promise<{ success: boolean; message: string; count: number }> => {
-    setIsSyncingSheets(true);
+    if (!isBackground) {
+      setIsSyncingSheets(true);
+    }
     try {
       const result = await fetchOrdersFromGoogleSheet(sheetUrlOrId);
       if (result.success && result.orders.length > 0) {
@@ -1396,14 +1476,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 clientSignature: existing.clientSignature || newOrd.clientSignature,
                 photos: existing.photos && existing.photos.length > 0 ? existing.photos : newOrd.photos,
                 checklist: existing.checklist && existing.checklist.length > 0 ? existing.checklist : newOrd.checklist,
+                status:
+                  existing.status === 'concluida' || existing.status === 'cancelada'
+                    ? existing.status
+                    : newOrd.status,
               });
             } else {
               existingMap.set(newOrd.id, newOrd);
             }
           });
 
-          return Array.from(existingMap.values());
+          const merged = Array.from(existingMap.values());
+          // Sync merged to server state so all clients get it
+          fetch('/api/state', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ orders: merged }),
+          }).catch(() => {});
+
+          return merged;
         });
+
+        setLastAutoSyncTime(new Date());
 
         // Register missing clients from sheet
         result.orders.forEach((ord) => {
@@ -1446,7 +1540,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } catch (err: any) {
       return { success: false, message: err.message || 'Erro ao sincronizar com Google Sheets.', count: 0 };
     } finally {
-      setIsSyncingSheets(false);
+      if (!isBackground) {
+        setIsSyncingSheets(false);
+      }
     }
   };
 
@@ -1669,6 +1765,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         importRawSheetData,
         pushOrdersToGoogleSheet,
         isSyncingSheets,
+        lastAutoSyncTime,
+        isAutoSyncActive,
         users,
         currentUser,
         setCurrentUser,

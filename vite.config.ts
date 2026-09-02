@@ -48,11 +48,315 @@ let devUsers: any[] = [
     phone: '(11) 99999-0000',
     avatarColor: 'bg-slate-900',
   },
+  {
+    id: 'usr-1',
+    name: 'Mariana Costa',
+    email: 'mariana.costa@wfs.aero',
+    section: 'Faturamento',
+    roleTitle: 'Analista de Faturamento Pleno',
+    department: 'Controladoria & Cobrança',
+    password: hashPassword('123'),
+    privilege: 'supervisor',
+    privilegeLabel: 'Supervisor de Operações (Cobertura)',
+    canValidateBilling: true,
+    canDeleteOS: true,
+    canAccessExecutive: true,
+    canAccessSettings: true,
+    mustChangePassword: false,
+    firstAccess: false,
+    active: true,
+    createdAt: '2026-01-15T08:00:00.000Z',
+    role: 'supervisor',
+    roleLabel: 'Supervisor Geral de Operações',
+    phone: '(11) 95432-1098',
+    avatarColor: 'bg-red-600',
+  },
+  {
+    id: 'usr-3',
+    name: 'Amanda Aparecida Vasco Cortez',
+    email: 'amanda.cortez@wfs.aero',
+    section: 'Atendimento / Rampa',
+    roleTitle: 'Encarregada de Operações de Solo',
+    department: 'Operações Pátio',
+    password: hashPassword('123'),
+    privilege: 'supervisor',
+    privilegeLabel: 'Supervisor de Operações',
+    canValidateBilling: true,
+    canDeleteOS: true,
+    canAccessExecutive: true,
+    canAccessSettings: false,
+    mustChangePassword: false,
+    firstAccess: false,
+    active: true,
+    createdAt: '2026-02-01T08:00:00.000Z',
+    role: 'operador_campo',
+    roleLabel: 'Encarregada de Campo & Pista',
+    phone: '(11) 98765-1122',
+    avatarColor: 'bg-indigo-600',
+  },
+  {
+    id: 'usr-4',
+    name: 'Carlos Silva',
+    email: 'carlos.silva@wfs.aero',
+    section: 'Pista',
+    roleTitle: 'Operador GSE Especializado',
+    department: 'Operações Solo',
+    password: hashPassword('123'),
+    privilege: 'operador',
+    privilegeLabel: 'Operador de Solo / Campo',
+    canValidateBilling: false,
+    canDeleteOS: false,
+    canAccessExecutive: false,
+    canAccessSettings: false,
+    mustChangePassword: false,
+    firstAccess: false,
+    active: true,
+    createdAt: '2026-02-15T08:00:00.000Z',
+    role: 'operador_campo',
+    roleLabel: 'Operador GSE de Pista',
+    phone: '(11) 98765-4321',
+    avatarColor: 'bg-amber-600',
+  },
+  {
+    id: 'usr-5',
+    name: 'Lucas Mendes',
+    email: 'lucas.mendes@wfs.aero',
+    section: 'Manutenção GSE',
+    roleTitle: 'Técnico Especialista em Solo',
+    department: 'Engenharia & Equipamentos',
+    password: hashPassword('123'),
+    privilege: 'analista',
+    privilegeLabel: 'Analista Técnico',
+    canValidateBilling: true,
+    canDeleteOS: false,
+    canAccessExecutive: true,
+    canAccessSettings: false,
+    mustChangePassword: false,
+    firstAccess: false,
+    active: true,
+    createdAt: '2026-02-20T08:00:00.000Z',
+    role: 'tecnico',
+    roleLabel: 'Técnico Especialista em Solo',
+    phone: '(11) 97654-3210',
+    avatarColor: 'bg-blue-600',
+  },
 ];
 
 function sanitizeUser(u: any) {
   const { password, ...safe } = u;
   return safe;
+}
+
+// Server-Sent Events (SSE) active client pool for instant cross-browser updates
+const sseClients: any[] = [];
+
+const broadcastSystemEvent = (eventData: Record<string, any>) => {
+  const payload = `data: ${JSON.stringify(eventData)}\n\n`;
+  for (let i = sseClients.length - 1; i >= 0; i--) {
+    const client = sseClients[i];
+    try {
+      client.write(payload);
+    } catch {
+      sseClients.splice(i, 1);
+    }
+  }
+};
+
+// Central in-memory state shared across all sessions
+let sharedAppState: any = {
+  orders: [],
+  invoices: [],
+  clients: [],
+  equipments: [],
+  laborServices: [],
+  company: null,
+  updatedAt: new Date().toISOString(),
+  lastSheetSync: null,
+};
+
+// CSV parsing helper
+function parseCsvLine(text: string): string[] {
+  const result: string[] = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') {
+      if (inQuotes && text[i + 1] === '"') {
+        cur += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (c === ',' && !inQuotes) {
+      result.push(cur.trim());
+      cur = '';
+    } else {
+      cur += c;
+    }
+  }
+  result.push(cur.trim());
+  return result;
+}
+
+function parseOrdersFromCsv(text: string): any[] {
+  if (!text) return [];
+  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  const parsedRows = lines.map(parseCsvLine);
+  if (parsedRows.length === 0) return [];
+
+  // Find header row
+  let headerIdx = -1;
+  for (let i = 0; i < Math.min(parsedRows.length, 10); i++) {
+    const rowStr = parsedRows[i].join(' ').toLowerCase();
+    if (
+      rowStr.includes('número os') ||
+      rowStr.includes('numero os') ||
+      (rowStr.includes('cliente') && (rowStr.includes('serviço') || rowStr.includes('valor') || rowStr.includes('status')))
+    ) {
+      headerIdx = i;
+      break;
+    }
+  }
+
+  const dataRows = headerIdx >= 0 ? parsedRows.slice(headerIdx + 1) : parsedRows;
+  const orders: any[] = [];
+
+  dataRows.forEach((row, idx) => {
+    if (row.length < 2 || row.every((c) => !c || c.trim() === '')) return;
+    if (row[0] && row[0].includes('SISTEMA WFS') && row.length === 1) return;
+
+    const numOS = row[0]?.trim() || `OS-${31880 + idx}`;
+    if (numOS.toLowerCase() === 'número os' || numOS.toLowerCase() === 'numero os') return;
+
+    const dateTimeRaw = row[1] || '';
+    const clientName = row[2] || 'Cliente WFS';
+    const clientDoc = row[3] || '-';
+    const location = row[4] || 'Aeroporto / Pista';
+    const categoryRaw = row[5] || 'Serviços Auxiliares de Transporte';
+    const title = row[6] || 'Atendimento Operacional';
+    const itemsRaw = row[7] || title;
+    const totalAmountRaw = row[8] || '0';
+    const statusRaw = row[9] || 'CONCLUÍDA (CAMPO)';
+    const agentName = row[10] || 'Operador GSE';
+    const startTime = row[11] || '08:00';
+    const endTime = row[12] || '17:00';
+    const quantity = row[13] || '1';
+    const filledBy = row[14] || 'Responsável de Campo';
+    const signature = row[15] || '';
+    const fotoUrl = row[16] || '';
+    const invoiceNum = row[17] || '-';
+
+    const cleanVal = totalAmountRaw.replace(/[^\d,.-]/g, '').replace('.', '').replace(',', '.');
+    const totalAmount = parseFloat(cleanVal) || 0;
+
+    let status = 'aguardando_validacao';
+    const sLow = statusRaw.toLowerCase();
+    if (sLow.includes('faturada') || (invoiceNum && invoiceNum !== '-' && invoiceNum.trim() !== '')) {
+      status = 'faturada';
+    } else if (sLow.includes('paga')) {
+      status = 'paga';
+    } else if (sLow.includes('cancelada')) {
+      status = 'cancelada';
+    }
+
+    orders.push({
+      id: `sheet-os-${numOS.replace(/[^a-zA-Z0-9]/g, '')}-${idx + 1}`,
+      osNumber: numOS,
+      clientId: `cli-${clientName.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 10)}`,
+      clientName,
+      clientDocument: clientDoc,
+      workLocation: location,
+      category: 'misto',
+      title,
+      description: itemsRaw,
+      status,
+      technicianName: agentName,
+      agentName,
+      startTime,
+      endTime,
+      quantity,
+      filledBy,
+      createdBy: filledBy,
+      createdByRole: 'Encarregado de Campo',
+      createdOrigin: 'campo_app',
+      createdAt: new Date().toISOString(),
+      scheduledDate: dateTimeRaw ? dateTimeRaw.split(' ')[0] : new Date().toISOString().split('T')[0],
+      totalAmount,
+      canhotoUrl: fotoUrl.startsWith('http') ? fotoUrl : undefined,
+      photos: fotoUrl.startsWith('http')
+        ? [{ id: `photo-${idx}`, url: fotoUrl, title: 'Foto Canhoto Drive', category: 'canhoto', timestamp: new Date().toISOString() }]
+        : [],
+      clientSignature: signature && !signature.includes('-') ? { signerName: signature, signedAt: new Date().toISOString() } : undefined,
+      invoiceNumber: invoiceNum !== '-' ? invoiceNum : undefined,
+    });
+  });
+
+  return orders;
+}
+
+let lastCsvHash = '';
+let isAutoSyncing = false;
+
+async function autoSyncGoogleSheets() {
+  if (isAutoSyncing) return;
+  isAutoSyncing = true;
+  try {
+    const sheetId = '1qT1rXOefT2lWHh7Z7wcxXE3RnnfWPu1Qe0xyI2HI7hk';
+    const gid = '0';
+    const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&gid=${gid}`;
+    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    if (!res.ok) return;
+    const text = await res.text();
+    if (!text || text.includes('<html') || text.includes('accounts.google.com')) return;
+
+    const hash = `${text.length}_${text.slice(0, 100)}_${text.slice(-100)}`;
+    const shouldUpdate = hash !== lastCsvHash || !sharedAppState.orders || sharedAppState.orders.length === 0;
+
+    if (shouldUpdate) {
+      lastCsvHash = hash;
+      const parsed = parseOrdersFromCsv(text);
+      if (parsed.length > 0) {
+        const existingMap = new Map<string, any>();
+        (sharedAppState.orders || []).forEach((o: any) => existingMap.set(o.id, o));
+
+        parsed.forEach((newOrd: any) => {
+          const existing = existingMap.get(newOrd.id);
+          if (existing) {
+            existingMap.set(newOrd.id, {
+              ...existing,
+              ...newOrd,
+              clientSignature: existing.clientSignature || newOrd.clientSignature,
+              photos: existing.photos && existing.photos.length > 0 ? existing.photos : newOrd.photos,
+              checklist: existing.checklist && existing.checklist.length > 0 ? existing.checklist : newOrd.checklist,
+              status: (existing.status === 'faturada' || existing.status === 'paga' || existing.status === 'validada') ? existing.status : newOrd.status,
+            });
+          } else {
+            existingMap.set(newOrd.id, newOrd);
+          }
+        });
+
+        sharedAppState.orders = Array.from(existingMap.values());
+        sharedAppState.updatedAt = new Date().toISOString();
+        sharedAppState.lastSheetSync = new Date().toISOString();
+
+        console.log(`[AUTO-SYNC] Google Sheets sincronizado com sucesso: ${sharedAppState.orders.length} ordens disponíveis. Notificando clientes via SSE...`);
+
+        broadcastSystemEvent({
+          type: 'STATE_CHANGE',
+          appState: sharedAppState,
+          source: 'google_sheets_auto_sync',
+          lastSheetSync: sharedAppState.lastSheetSync,
+          totalOrders: sharedAppState.orders.length,
+          timestamp: new Date().toISOString(),
+        });
+      }
+    }
+  } catch (err: any) {
+    console.warn('[AUTO-SYNC] Aviso ao sincronizar com Google Sheets:', err.message);
+  } finally {
+    isAutoSyncing = false;
+  }
 }
 
 function apiServerPlugin(): Plugin {
@@ -235,6 +539,304 @@ function apiServerPlugin(): Plugin {
       res.end(JSON.stringify({ success: true, users: devUsers.map(sanitizeUser), source: 'memory' }));
       return;
     }
+    // Server-Sent Events (SSE) Real-Time Synchronization Endpoint
+    if (req.url === '/api/system/events' && req.method === 'GET') {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        Connection: 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      });
+
+      const initPayload = JSON.stringify({
+        type: 'INIT',
+        status: devStatus,
+        isMaintenanceMode: devIsMaintenance,
+        masterEmail: MASTER_EMAIL,
+        users: devUsers.map(sanitizeUser),
+        appState: sharedAppState,
+        lastSheetSync: sharedAppState.lastSheetSync,
+        serverTime: new Date().toISOString(),
+      });
+      res.write(`data: ${initPayload}\n\n`);
+      sseClients.push(res);
+
+      const heartbeat = setInterval(() => {
+        try {
+          res.write(': heartbeat\n\n');
+        } catch {
+          clearInterval(heartbeat);
+        }
+      }, 20000);
+
+      req.on('close', () => {
+        clearInterval(heartbeat);
+        const idx = sseClients.indexOf(res);
+        if (idx !== -1) sseClients.splice(idx, 1);
+      });
+      return;
+    }
+
+    // Shared State sync endpoint (GET & POST)
+    if (req.url === '/api/state' && req.method === 'GET') {
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(
+        JSON.stringify({
+          success: true,
+          appState: sharedAppState,
+          isMaintenanceMode: devIsMaintenance,
+          lastSheetSync: sharedAppState.lastSheetSync,
+          updatedAt: sharedAppState.updatedAt,
+        })
+      );
+      return;
+    }
+
+    if (req.url === '/api/state' && req.method === 'POST') {
+      let body = '';
+      req.on('data', (c: any) => {
+        body += c;
+      });
+      req.on('end', () => {
+        try {
+          const parsed = JSON.parse(body || '{}');
+          if (Array.isArray(parsed.orders)) sharedAppState.orders = parsed.orders;
+          if (Array.isArray(parsed.invoices)) sharedAppState.invoices = parsed.invoices;
+          if (Array.isArray(parsed.clients)) sharedAppState.clients = parsed.clients;
+          if (Array.isArray(parsed.equipments)) sharedAppState.equipments = parsed.equipments;
+          if (Array.isArray(parsed.laborServices)) sharedAppState.laborServices = parsed.laborServices;
+          if (parsed.company) sharedAppState.company = parsed.company;
+          sharedAppState.updatedAt = new Date().toISOString();
+
+          broadcastSystemEvent({
+            type: 'STATE_CHANGE',
+            appState: sharedAppState,
+            source: 'client_state_update',
+            timestamp: new Date().toISOString(),
+          });
+
+          res.statusCode = 200;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ success: true, message: 'Estado global sincronizado no servidor.' }));
+        } catch (e: any) {
+          res.statusCode = 500;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ success: false, error: e.message }));
+        }
+      });
+      return;
+    }
+
+    // Orders REST API
+    if (req.url?.startsWith('/api/ordens') && req.method === 'GET') {
+      if (!sharedAppState.orders || sharedAppState.orders.length === 0) {
+        await autoSyncGoogleSheets();
+      }
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(
+        JSON.stringify({
+          success: true,
+          orders: sharedAppState.orders || [],
+          total: (sharedAppState.orders || []).length,
+          lastSheetSync: sharedAppState.lastSheetSync,
+          source: 'server_state',
+        })
+      );
+      return;
+    }
+
+    if (req.url === '/api/ordens' && req.method === 'POST') {
+      let body = '';
+      req.on('data', (c: any) => {
+        body += c;
+      });
+      req.on('end', () => {
+        try {
+          const newOrder = JSON.parse(body || '{}');
+          if (!newOrder.id) newOrder.id = `os-${Date.now()}`;
+          if (!sharedAppState.orders) sharedAppState.orders = [];
+          sharedAppState.orders.unshift(newOrder);
+          sharedAppState.updatedAt = new Date().toISOString();
+
+          broadcastSystemEvent({
+            type: 'STATE_CHANGE',
+            appState: sharedAppState,
+            source: 'order_create',
+            orderId: newOrder.id,
+            timestamp: new Date().toISOString(),
+          });
+
+          res.statusCode = 201;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ success: true, order: newOrder }));
+        } catch (e: any) {
+          res.statusCode = 500;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ success: false, error: e.message }));
+        }
+      });
+      return;
+    }
+
+    if (req.url?.startsWith('/api/ordens/') && req.method === 'PUT') {
+      const id = decodeURIComponent(req.url.replace('/api/ordens/', '').split('?')[0]);
+      let body = '';
+      req.on('data', (c: any) => {
+        body += c;
+      });
+      req.on('end', () => {
+        try {
+          const updates = JSON.parse(body || '{}');
+          if (!sharedAppState.orders) sharedAppState.orders = [];
+          let updatedOrder: any = null;
+          sharedAppState.orders = sharedAppState.orders.map((o: any) => {
+            if (o.id === id) {
+              updatedOrder = { ...o, ...updates };
+              return updatedOrder;
+            }
+            return o;
+          });
+          sharedAppState.updatedAt = new Date().toISOString();
+
+          broadcastSystemEvent({
+            type: 'STATE_CHANGE',
+            appState: sharedAppState,
+            source: 'order_update',
+            orderId: id,
+            timestamp: new Date().toISOString(),
+          });
+
+          res.statusCode = 200;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ success: true, order: updatedOrder }));
+        } catch (e: any) {
+          res.statusCode = 500;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ success: false, error: e.message }));
+        }
+      });
+      return;
+    }
+
+    if (req.url?.startsWith('/api/ordens/') && req.method === 'DELETE') {
+      const id = decodeURIComponent(req.url.replace('/api/ordens/', '').split('?')[0]);
+      if (!sharedAppState.orders) sharedAppState.orders = [];
+      sharedAppState.orders = sharedAppState.orders.filter((o: any) => o.id !== id);
+      sharedAppState.updatedAt = new Date().toISOString();
+
+      broadcastSystemEvent({
+        type: 'STATE_CHANGE',
+        appState: sharedAppState,
+        source: 'order_delete',
+        orderId: id,
+        timestamp: new Date().toISOString(),
+      });
+
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ success: true, message: 'OS removida com sucesso.' }));
+      return;
+    }
+
+    // Users CRUD Endpoints
+    if (req.url === '/api/users' && req.method === 'GET') {
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ success: true, users: devUsers.map(sanitizeUser) }));
+      return;
+    }
+
+    if (req.url === '/api/users' && req.method === 'POST') {
+      let body = '';
+      req.on('data', (c: any) => {
+        body += c;
+      });
+      req.on('end', () => {
+        try {
+          const newUser = JSON.parse(body || '{}');
+          if (!newUser.id) newUser.id = `usr-${Date.now()}`;
+          const plainPass = newUser.password || '123';
+          newUser.password = hashPassword(plainPass);
+          devUsers.push(newUser);
+
+          broadcastSystemEvent({
+            type: 'USERS_CHANGE',
+            users: devUsers.map(sanitizeUser),
+            source: 'user_create',
+            timestamp: new Date().toISOString(),
+          });
+
+          res.statusCode = 201;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ success: true, user: sanitizeUser(newUser) }));
+        } catch (e: any) {
+          res.statusCode = 500;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ success: false, error: e.message }));
+        }
+      });
+      return;
+    }
+
+    if (req.url?.startsWith('/api/users/') && req.method === 'PUT') {
+      const id = decodeURIComponent(req.url.replace('/api/users/', '').split('?')[0]);
+      let body = '';
+      req.on('data', (c: any) => {
+        body += c;
+      });
+      req.on('end', () => {
+        try {
+          const updates = JSON.parse(body || '{}');
+          let updatedUser: any = null;
+          devUsers = devUsers.map((u: any) => {
+            if (u.id === id) {
+              updatedUser = { ...u, ...updates };
+              if (updates.password) {
+                updatedUser.password = hashPassword(updates.password);
+              }
+              return updatedUser;
+            }
+            return u;
+          });
+
+          broadcastSystemEvent({
+            type: 'USERS_CHANGE',
+            users: devUsers.map(sanitizeUser),
+            source: 'user_update',
+            timestamp: new Date().toISOString(),
+          });
+
+          res.statusCode = 200;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ success: true, user: sanitizeUser(updatedUser) }));
+        } catch (e: any) {
+          res.statusCode = 500;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ success: false, error: e.message }));
+        }
+      });
+      return;
+    }
+
+    if (req.url?.startsWith('/api/users/') && req.method === 'DELETE') {
+      const id = decodeURIComponent(req.url.replace('/api/users/', '').split('?')[0]);
+      devUsers = devUsers.filter((u: any) => u.id !== id);
+
+      broadcastSystemEvent({
+        type: 'USERS_CHANGE',
+        users: devUsers.map(sanitizeUser),
+        source: 'user_delete',
+        timestamp: new Date().toISOString(),
+      });
+
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ success: true, message: 'Usuário removido com sucesso.' }));
+      return;
+    }
+
     // Health Check endpoint for connection testing
     if (req.url === '/api/system/health' && req.method === 'GET') {
       res.statusCode = 200;
@@ -626,9 +1228,21 @@ IMPORTANTE PARA CAMPOS COM DÚVIDA / ILEGÍVEIS:
     name: 'api-server-plugin',
     configureServer(server) {
       server.middlewares.use(handler);
+      setTimeout(() => {
+        autoSyncGoogleSheets();
+      }, 1000);
+      setInterval(() => {
+        autoSyncGoogleSheets();
+      }, 15000);
     },
     configurePreviewServer(server) {
       server.middlewares.use(handler);
+      setTimeout(() => {
+        autoSyncGoogleSheets();
+      }, 1000);
+      setInterval(() => {
+        autoSyncGoogleSheets();
+      }, 15000);
     },
   };
 }

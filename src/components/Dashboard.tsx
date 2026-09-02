@@ -65,6 +65,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
     importRawSheetData,
     pushOrdersToGoogleSheet,
     isSyncingSheets,
+    lastAutoSyncTime,
     totalFlightMinutes,
     totalFlightHoursFormatted,
     agentMetrics,
@@ -190,7 +191,26 @@ export const Dashboard: React.FC<DashboardProps> = ({
         </div>
 
         {/* Discrete Sync & Total Counter */}
-        <div className="flex items-center gap-2.5">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Automatic Realtime Sync Badge */}
+          <div
+            className="flex items-center gap-1.5 px-2.5 py-1.5 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-xl text-xs font-semibold"
+            title={`Sincronização em tempo real ativa. Alterações são refletidas automaticamente para todos os usuários. Última sincronização: ${
+              lastAutoSyncTime ? lastAutoSyncTime.toLocaleTimeString('pt-BR') : 'agora'
+            }`}
+          >
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-600"></span>
+            </span>
+            <span className="font-bold">Tempo Real</span>
+            <span className="text-emerald-700 font-normal hidden md:inline text-[11px]">
+              {lastAutoSyncTime
+                ? `• ${lastAutoSyncTime.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`
+                : '• Ativo'}
+            </span>
+          </div>
+
           <span className="text-xs text-slate-500 font-medium hidden sm:inline">
             <strong className="text-slate-900">{orders.length}</strong> ordens
           </span>
@@ -200,10 +220,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
             disabled={isSyncingSheets}
             onClick={handleSyncNow}
             className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 active:scale-95 text-slate-700 font-bold text-xs rounded-xl flex items-center gap-1.5 transition-all border border-slate-200 disabled:opacity-50 cursor-pointer"
-            title="Sincronizar dados com o Google Sheets"
+            title="Forçar sincronização manual agora com o Google Sheets"
           >
             <RefreshCw className={`w-3.5 h-3.5 text-slate-600 ${isSyncingSheets ? 'animate-spin text-emerald-600' : ''}`} />
-            <span>{isSyncingSheets ? 'Sincronizando...' : 'Sincronizar Planilha'}</span>
+            <span>{isSyncingSheets ? 'Sincronizando...' : 'Sincronizar Agora'}</span>
           </button>
         </div>
       </div>
