@@ -282,9 +282,12 @@ export const uploadPhotoToGoogleDrive = async (
 
   // 1. Notify local API to record upload and broadcast event
   try {
+    const localCtrl = new AbortController();
+    const localTimeout = setTimeout(() => localCtrl.abort(), 4000);
     await fetch('/api/drive/upload-canhoto', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      signal: localCtrl.signal,
       body: JSON.stringify({
         imageBase64: base64Image,
         fileName: targetFileName,
@@ -293,6 +296,7 @@ export const uploadPhotoToGoogleDrive = async (
         serviceTitle: serviceTitle || 'Canhoto Enviado ao Drive',
       }),
     });
+    clearTimeout(localTimeout);
   } catch (apiErr) {
     console.warn('Backend drive notification, continuing with cloud link generation:', apiErr);
   }
@@ -300,10 +304,13 @@ export const uploadPhotoToGoogleDrive = async (
   // 2. If webhook is configured, dispatch sending to Google Apps Script / Drive Webhook to save in Drive folder and Fotos_SO sheet
   if (cfg.webhookUrl && cfg.webhookUrl.startsWith('http')) {
     try {
+      const webhookCtrl = new AbortController();
+      const webhookTimeout = setTimeout(() => webhookCtrl.abort(), 5000);
       const response = await fetch(cfg.webhookUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         mode: 'no-cors',
+        signal: webhookCtrl.signal,
         body: JSON.stringify({
           action: 'upload_drive_canhoto',
           driveFolderId: folderId,
@@ -317,6 +324,7 @@ export const uploadPhotoToGoogleDrive = async (
           driveFileUrl: driveFileUrl,
         }),
       });
+      clearTimeout(webhookTimeout);
       console.log('Dispatched photo upload to Google Drive Webhook (Fotos_SO)', response);
     } catch (err) {
       console.warn('Webhook upload error, continuing with cloud link generation', err);

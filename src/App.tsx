@@ -136,6 +136,15 @@ const MainApp: React.FC = () => {
 
   const [showSettingsLoginModal, setShowSettingsLoginModal] = useState(false);
 
+  // Global upload confirmation feedback toast
+  const [uploadConfirmation, setUploadConfirmation] = useState<{
+    osNumber: string;
+    fileName: string;
+    timestamp: string;
+    orderId: string;
+    tag?: string;
+  } | null>(null);
+
   // Listen to popstate / hashchange
   useEffect(() => {
     const handleHashOrPop = () => {
@@ -198,9 +207,63 @@ const MainApp: React.FC = () => {
     setEditingOrder(null);
   };
 
-  const handleDigitalizeSuccess = () => {
-    // Foto/canhoto enviado diretamente para o Google Drive (Pasta Fotos_SO).
-    // O processamento e leitura são feitos diretamente pela IA configurada na nuvem.
+  const handleDigitalizeSuccess = (uploadInfo?: any) => {
+    if (!uploadInfo) return null;
+
+    // Registra a OS no sistema para rastreabilidade imediata nas contagens e painéis
+    const newOrder = addOrder({
+      clientId: '',
+      clientName: uploadInfo.optionalTag ? `Canhoto (${uploadInfo.optionalTag})` : 'Aguardando Leitura IA / Faturamento',
+      clientDocument: '',
+      clientPhone: '',
+      clientEmail: '',
+      workLocation: 'Operação de Campo / Pista',
+      category: 'servico_tecnico',
+      title: uploadInfo.optionalTag ? `Canhoto ${uploadInfo.optionalTag} - Fotos_SO` : 'Canhoto Enviado ao Google Drive',
+      description: `Foto do canhoto enviada diretamente para a pasta Fotos_SO do Google Drive (Arquivo: ${uploadInfo.fileName}). Aguardando processamento e leitura automática pela IA na nuvem.`,
+      status: 'aguardando_validacao',
+      createdBy: currentUser?.name || 'Técnico de Campo',
+      createdByRole: currentUser?.roleLabel || 'Operador de Campo',
+      createdOrigin: 'ocr_camera',
+      scheduledDate: new Date().toISOString().slice(0, 10),
+      executionStartDate: new Date().toISOString().slice(0, 10),
+      photos: [
+        {
+          id: `photo-${Date.now()}`,
+          url: uploadInfo.imagePreview || uploadInfo.fileUrl,
+          title: uploadInfo.fileName,
+          category: 'canhoto',
+          timestamp: new Date().toISOString(),
+          notes: `Salvo no Google Drive: ${uploadInfo.fileName}`,
+        },
+      ],
+      technicianName: currentUser?.name || 'Técnico de Campo',
+      canhotoUrl: uploadInfo.fileUrl,
+      equipmentItems: [],
+      laborItems: [],
+      materialItems: [],
+      checklist: [],
+      discount: 0,
+      addition: 0,
+      totalAmount: 0,
+    });
+
+    const confirmationData = {
+      osNumber: newOrder.osNumber,
+      fileName: uploadInfo.fileName,
+      timestamp: uploadInfo.timestamp || new Date().toLocaleTimeString('pt-BR'),
+      orderId: newOrder.id,
+      tag: uploadInfo.optionalTag,
+    };
+
+    setUploadConfirmation(confirmationData);
+
+    // Auto-dismiss após 10 segundos
+    setTimeout(() => {
+      setUploadConfirmation(curr => (curr?.orderId === newOrder.id ? null : curr));
+    }, 10000);
+
+    return newOrder;
   };
 
   const handleNavigateToOSWithFilter = (status?: OSStatus) => {
@@ -280,7 +343,64 @@ const MainApp: React.FC = () => {
           <DigitalizarOSModal
             onClose={() => setShowDigitalizarModal(false)}
             onSuccess={handleDigitalizeSuccess}
+            onViewCreatedOS={(orderId) => {
+              const ord = orders.find(o => o.id === orderId);
+              if (ord) setSelectedOrderForDetail(ord);
+            }}
           />
+        )}
+
+        {/* Floating Global Confirmation Toast (Field Mode) */}
+        {uploadConfirmation && (
+          <div className="fixed top-4 right-4 sm:right-6 z-50 max-w-md w-[calc(100vw-32px)] bg-slate-900 text-white p-4 rounded-2xl shadow-2xl border border-emerald-500/50 animate-in slide-in-from-top-4 duration-300 flex items-start gap-3">
+            <div className="w-9 h-9 rounded-xl bg-emerald-500/20 border border-emerald-400/40 text-emerald-400 flex items-center justify-center shrink-0 mt-0.5 shadow-xs">
+              <CheckCircle2 className="w-5 h-5" />
+            </div>
+            <div className="flex-1 space-y-1 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="font-black text-emerald-400 uppercase tracking-wider text-[10px] flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  Confirmação de Envio • Google Drive
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setUploadConfirmation(null)}
+                  className="text-slate-400 hover:text-white p-0.5 rounded-lg cursor-pointer"
+                  title="Fechar"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <p className="font-bold text-sm text-white">
+                Canhoto Gravado com Sucesso!
+              </p>
+              <p className="text-slate-300 leading-relaxed">
+                Salvo na pasta <strong className="text-emerald-300">Fotos_SO</strong> e registrado sob <strong className="text-white font-mono">{uploadConfirmation.osNumber}</strong>. A IA iniciou a leitura automática na nuvem.
+              </p>
+              <div className="pt-2 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const ord = orders.find(o => o.id === uploadConfirmation.orderId);
+                    if (ord) {
+                      setSelectedOrderForDetail(ord);
+                    }
+                    setUploadConfirmation(null);
+                  }}
+                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-black rounded-lg text-[11px] transition-colors cursor-pointer"
+                >
+                  Visualizar OS Registrada
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setUploadConfirmation(null)}
+                  className="px-3 py-1.5 bg-white/10 hover:bg-white/20 text-slate-300 hover:text-white font-bold rounded-lg text-[11px] transition-colors cursor-pointer"
+                >
+                  Dispensar
+                </button>
+              </div>
+            </div>
+          </div>
         )}
 
         {selectedOrderForDetail && (
@@ -714,7 +834,64 @@ const MainApp: React.FC = () => {
         <DigitalizarOSModal
           onClose={() => setShowDigitalizarModal(false)}
           onSuccess={handleDigitalizeSuccess}
+          onViewCreatedOS={(orderId) => {
+            const ord = orders.find(o => o.id === orderId);
+            if (ord) setSelectedOrderForDetail(ord);
+          }}
         />
+      )}
+
+      {/* Floating Global Confirmation Toast (Admin / Executive Mode) */}
+      {uploadConfirmation && (
+        <div className="fixed top-4 right-4 sm:right-6 z-50 max-w-md w-[calc(100vw-32px)] bg-slate-900 text-white p-4 rounded-2xl shadow-2xl border border-emerald-500/50 animate-in slide-in-from-top-4 duration-300 flex items-start gap-3">
+          <div className="w-9 h-9 rounded-xl bg-emerald-500/20 border border-emerald-400/40 text-emerald-400 flex items-center justify-center shrink-0 mt-0.5 shadow-xs">
+            <CheckCircle2 className="w-5 h-5" />
+          </div>
+          <div className="flex-1 space-y-1 text-xs">
+            <div className="flex items-center justify-between">
+              <span className="font-black text-emerald-400 uppercase tracking-wider text-[10px] flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                Confirmação de Envio • Google Drive
+              </span>
+              <button
+                type="button"
+                onClick={() => setUploadConfirmation(null)}
+                className="text-slate-400 hover:text-white p-0.5 rounded-lg cursor-pointer"
+                title="Fechar"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="font-bold text-sm text-white">
+              Canhoto Gravado com Sucesso!
+            </p>
+            <p className="text-slate-300 leading-relaxed">
+              Salvo na pasta <strong className="text-emerald-300">Fotos_SO</strong> e registrado sob <strong className="text-white font-mono">{uploadConfirmation.osNumber}</strong>. A IA iniciou a leitura automática na nuvem.
+            </p>
+            <div className="pt-2 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  const ord = orders.find(o => o.id === uploadConfirmation.orderId);
+                  if (ord) {
+                    setSelectedOrderForDetail(ord);
+                  }
+                  setUploadConfirmation(null);
+                }}
+                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-black rounded-lg text-[11px] transition-colors cursor-pointer"
+              >
+                Visualizar OS Registrada
+              </button>
+              <button
+                type="button"
+                onClick={() => setUploadConfirmation(null)}
+                className="px-3 py-1.5 bg-white/10 hover:bg-white/20 text-slate-300 hover:text-white font-bold rounded-lg text-[11px] transition-colors cursor-pointer"
+              >
+                Dispensar
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

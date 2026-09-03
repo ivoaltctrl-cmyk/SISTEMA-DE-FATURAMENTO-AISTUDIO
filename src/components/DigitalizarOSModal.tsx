@@ -10,8 +10,11 @@ import {
   Upload,
   X,
   AlertTriangle,
-  FileCheck
+  FileCheck,
+  Sparkles,
+  ArrowRight
 } from 'lucide-react';
+import confetti from 'canvas-confetti';
 import {
   uploadPhotoToGoogleDrive,
   OFFICIAL_DRIVE_FOLDER_URL,
@@ -22,23 +25,29 @@ import {
 } from '../services/sheetsService';
 import { optimizeImageForUpload } from '../utils/imageOptimizer';
 
-interface DigitalizarOSModalProps {
-  onClose: () => void;
-  onSuccess?: (uploadData?: any) => void;
-}
-
-interface UploadedFileInfo {
+export interface UploadedFileInfo {
   fileName: string;
   fileUrl: string;
   folderUrl: string;
   folderId: string;
   sheetName: string;
   timestamp: string;
+  imagePreview?: string;
+  osNumber?: string;
+  optionalTag?: string;
+  orderId?: string;
+}
+
+interface DigitalizarOSModalProps {
+  onClose: () => void;
+  onSuccess?: (uploadData: UploadedFileInfo) => any;
+  onViewCreatedOS?: (orderId: string) => void;
 }
 
 export const DigitalizarOSModal: React.FC<DigitalizarOSModalProps> = ({
   onClose,
   onSuccess,
+  onViewCreatedOS,
 }) => {
   const [step, setStep] = useState<'select' | 'uploading' | 'success' | 'error'>('select');
   const [imagePreview, setImagePreview] = useState<string | null>(null);
@@ -46,6 +55,7 @@ export const DigitalizarOSModal: React.FC<DigitalizarOSModalProps> = ({
   const [uploadStatusText, setUploadStatusText] = useState<string>('Preparando envio...');
   const [optionalTag, setOptionalTag] = useState<string>('');
   const [uploadedInfo, setUploadedInfo] = useState<UploadedFileInfo | null>(null);
+  const [createdOrderId, setCreatedOrderId] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
@@ -105,13 +115,37 @@ export const DigitalizarOSModal: React.FC<DigitalizarOSModalProps> = ({
         folderId: driveResult.folderId || cfg.driveFolderId || OFFICIAL_DRIVE_FOLDER_ID,
         sheetName: driveResult.sheetName || OFFICIAL_PHOTOS_SHEET_NAME,
         timestamp: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) + ' - ' + new Date().toLocaleDateString('pt-BR'),
+        imagePreview: base64ToSend,
+        osNumber: tagClean,
+        optionalTag: optionalTag.trim(),
       };
 
       setUploadedInfo(info);
       setStep('success');
 
+      // Trigger celebratory confetti
+      try {
+        confetti({
+          particleCount: 60,
+          spread: 70,
+          origin: { y: 0.6 }
+        });
+      } catch {
+        // ignore
+      }
+
+      // Haptic feedback on mobile
+      try {
+        navigator.vibrate?.([80, 40, 80]);
+      } catch {
+        // ignore
+      }
+
       if (onSuccess) {
-        onSuccess(info);
+        const result = onSuccess(info);
+        if (result?.id) {
+          setCreatedOrderId(result.id);
+        }
       }
     } catch (err: any) {
       console.error('Error uploading directly to Google Drive:', err);
@@ -125,6 +159,7 @@ export const DigitalizarOSModal: React.FC<DigitalizarOSModalProps> = ({
     setErrorMessage(null);
     setUploadedInfo(null);
     setOptionalTag('');
+    setCreatedOrderId(null);
     setStep('select');
   };
 
@@ -307,18 +342,22 @@ export const DigitalizarOSModal: React.FC<DigitalizarOSModalProps> = ({
 
           {/* STEP 3: SUCCESS STATE */}
           {step === 'success' && uploadedInfo && (
-            <div className="space-y-5 animate-in fade-in duration-200">
+            <div className="space-y-4 animate-in fade-in duration-200">
               
               {/* Success Badge */}
-              <div className="bg-emerald-50 border border-emerald-200 rounded-3xl p-5 text-center space-y-2">
+              <div className="bg-emerald-50 border border-emerald-300 rounded-3xl p-5 text-center space-y-2 shadow-xs">
+                <div className="inline-flex items-center gap-2 px-3 py-1 bg-emerald-100 border border-emerald-300 text-emerald-800 text-[11px] font-black rounded-full uppercase tracking-wider mb-1">
+                  <span className="w-2 h-2 rounded-full bg-emerald-600 animate-pulse" />
+                  Confirmação de Envio • Google Drive
+                </div>
                 <div className="w-12 h-12 bg-emerald-600 text-white rounded-2xl flex items-center justify-center mx-auto shadow-md">
                   <CheckCircle2 className="w-7 h-7" />
                 </div>
                 <h3 className="text-base font-black text-emerald-950">
-                  Foto Enviada com Sucesso ao Google Drive!
+                  Canhoto Gravado com Sucesso!
                 </h3>
-                <p className="text-xs text-emerald-800 max-w-md mx-auto">
-                  A imagem foi gravada na pasta <strong>Fotos_SO</strong>. A IA configurada na nuvem fará a leitura e o processamento automático.
+                <p className="text-xs text-emerald-800 max-w-md mx-auto leading-relaxed">
+                  A foto foi salva na pasta <strong>{OFFICIAL_DRIVE_FOLDER_NAME}</strong> do Google Drive e o atendimento foi registrado nas ordens do sistema. A IA iniciará a leitura automática na nuvem.
                 </p>
               </div>
 
@@ -333,8 +372,14 @@ export const DigitalizarOSModal: React.FC<DigitalizarOSModalProps> = ({
                     />
                   </div>
                 )}
-                <div className="space-y-1 text-xs text-slate-700 flex-1 w-full">
-                  <div className="flex items-center justify-between border-b border-slate-200 pb-1">
+                <div className="space-y-1.5 text-xs text-slate-700 flex-1 w-full">
+                  <div className="flex items-center justify-between border-b border-slate-200 pb-1.5">
+                    <span className="text-slate-500 font-medium">Protocolo / OS:</span>
+                    <span className="font-mono font-black text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200">
+                      {uploadedInfo.osNumber || 'OS Registrada'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between border-b border-slate-200 py-1">
                     <span className="text-slate-500 font-medium">Arquivo:</span>
                     <span className="font-mono font-bold text-slate-900 truncate max-w-[200px]" title={uploadedInfo.fileName}>
                       {uploadedInfo.fileName}
@@ -345,18 +390,21 @@ export const DigitalizarOSModal: React.FC<DigitalizarOSModalProps> = ({
                     <span className="font-bold text-emerald-700">{OFFICIAL_DRIVE_FOLDER_NAME}</span>
                   </div>
                   <div className="flex items-center justify-between border-b border-slate-200 py-1">
-                    <span className="text-slate-500 font-medium">Planilha Vinculada:</span>
-                    <span className="font-mono text-slate-800">{uploadedInfo.sheetName}</span>
+                    <span className="text-slate-500 font-medium">Status Operacional:</span>
+                    <span className="font-bold text-emerald-800 flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                      Gravado na Nuvem • IA Notificada
+                    </span>
                   </div>
                   <div className="flex items-center justify-between pt-1">
-                    <span className="text-slate-500 font-medium">Envio Realizado:</span>
+                    <span className="text-slate-500 font-medium">Horário:</span>
                     <span className="text-slate-800 font-semibold">{uploadedInfo.timestamp}</span>
                   </div>
                 </div>
               </div>
 
               {/* Action Buttons */}
-              <div className="pt-2">
+              <div className="pt-2 space-y-2.5">
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   {/* Take Another Photo */}
                   <button
@@ -368,16 +416,40 @@ export const DigitalizarOSModal: React.FC<DigitalizarOSModalProps> = ({
                     Tirar Nova Foto / Enviar Outro
                   </button>
 
-                  {/* Close Modal */}
+                  {/* Close Modal & View / Return */}
+                  {createdOrderId && onViewCreatedOS ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onViewCreatedOS(createdOrderId);
+                        onClose();
+                      }}
+                      className="flex items-center justify-center gap-2.5 p-3.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-xs font-black transition-colors shadow-sm cursor-pointer active:scale-[0.99]"
+                    >
+                      <ArrowRight className="w-4 h-4" />
+                      Visualizar OS Registrada
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={onClose}
+                      className="flex items-center justify-center gap-2.5 p-3.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-black transition-colors shadow-sm cursor-pointer active:scale-[0.99]"
+                    >
+                      <CheckCircle2 className="w-4 h-4" />
+                      Concluir e Voltar ao Início
+                    </button>
+                  )}
+                </div>
+
+                {createdOrderId && onViewCreatedOS && (
                   <button
                     type="button"
                     onClick={onClose}
-                    className="flex items-center justify-center gap-2.5 p-3.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-black transition-colors shadow-sm cursor-pointer active:scale-[0.99]"
+                    className="w-full text-center py-2 text-xs font-bold text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
                   >
-                    <CheckCircle2 className="w-4 h-4" />
-                    Concluir e Fechar
+                    Fechar e Voltar ao Início
                   </button>
-                </div>
+                )}
               </div>
 
             </div>
