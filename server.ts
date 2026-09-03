@@ -13,6 +13,17 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json({ limit: '35mb' }));
 app.use(express.urlencoded({ extended: true, limit: '35mb' }));
 
+// Enable CORS and handle preflight OPTIONS
+app.use((req: Request, res: Response, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  next();
+});
+
 // Master Admin & System Defaults
 const MASTER_EMAIL = (process.env.MASTER_EMAIL || 'ivoaltctrl@gmail.com').toLowerCase().trim();
 const RAW_MASTER_PASSWORD = process.env.MASTER_PASSWORD || 'admin';
@@ -1312,7 +1323,7 @@ app.delete('/api/ordens/:id', (req: Request, res: Response) => {
    ========================================================================= */
 
 // API Endpoint for OCR / OS Digitalization
-app.post('/api/digitize-os', async (req: Request, res: Response) => {
+app.post(['/api/digitize-os', '/api/digitize-os/'], async (req: Request, res: Response) => {
   try {
     const { image, mimeType = 'image/jpeg' } = req.body;
 
@@ -1324,7 +1335,7 @@ app.post('/api/digitize-os', async (req: Request, res: Response) => {
     const ai = getGeminiClient();
 
     const result = await ai.models.generateContent({
-      model: 'gemini-3.7-flash',
+      model: 'gemini-flash-latest',
       contents: [
         {
           role: 'user',
@@ -1489,18 +1500,30 @@ app.post('/api/sheets/fetch', async (req: Request, res: Response) => {
   }
 });
 
-// Serve static assets from dist/
-const distPath = path.resolve(process.cwd(), 'dist');
-app.use(express.static(distPath));
+async function startServer() {
+  // Vite middleware for development
+  if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
+    // Serve static assets from dist/ in production
+    const distPath = path.resolve(process.cwd(), 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (_req: Request, res: Response) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  }
 
-// Fallback all other routes to SPA index.html
-app.get('*', (_req: Request, res: Response) => {
-  res.sendFile(path.join(distPath, 'index.html'));
-});
+  app.listen(Number(PORT), '0.0.0.0', () => {
+    console.log(`WFS OS Digital Server running on port ${PORT}`);
+    console.log(`[CONFIG] Master Admin: ${MASTER_EMAIL} (Senha inicial: admin)`);
+    console.log(`[CONFIG] Google Drive Folder ID: ${DRIVE_FOLDER_ID}`);
+    console.log(`[CONFIG] Sheet Fotos_SO vinculada`);
+  });
+}
 
-app.listen(PORT, () => {
-  console.log(`WFS OS Digital Server running on port ${PORT}`);
-  console.log(`[CONFIG] Master Admin: ${MASTER_EMAIL} (Senha inicial: admin)`);
-  console.log(`[CONFIG] Google Drive Folder ID: ${DRIVE_FOLDER_ID}`);
-  console.log(`[CONFIG] Sheet Fotos_SO vinculada`);
-});
+startServer();

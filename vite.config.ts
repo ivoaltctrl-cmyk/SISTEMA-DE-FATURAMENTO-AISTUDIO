@@ -399,8 +399,21 @@ function apiServerPlugin(): Plugin {
   let devStatus: 'ABERTO' | 'FECHADO' = 'ABERTO';
 
   const handler = async (req: any, res: any, next: any) => {
+    // CORS headers for all responses
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+    if (req.method === 'OPTIONS') {
+      res.statusCode = 204;
+      res.end();
+      return;
+    }
+
+    const pathname = (req.url || '').split('?')[0].replace(/\/$/, '') || '/';
+
     // Auth login endpoint
-    if (req.url === '/api/auth/login' && req.method === 'POST') {
+    if ((pathname === '/api/auth/login' || req.url === '/api/auth/login') && req.method === 'POST') {
       let body = '';
       req.on('data', (chunk: any) => { body += chunk; });
       req.on('end', () => {
@@ -987,7 +1000,7 @@ function apiServerPlugin(): Plugin {
       return;
     }
 
-    if (req.url === '/api/digitize-os' && req.method === 'POST') {
+    if ((pathname === '/api/digitize-os' || req.url === '/api/digitize-os') && req.method === 'POST') {
       try {
         let body = '';
         req.on('data', (chunk: any) => {
@@ -1042,7 +1055,7 @@ IMPORTANTE PARA CAMPOS COM DÚVIDA / ILEGÍVEIS:
 - Se a data não estiver legível, use a data de hoje no formato YYYY-MM-DD.`;
 
             const result = await ai.models.generateContent({
-              model: 'gemini-3.7-flash',
+              model: 'gemini-flash-latest',
               contents: [
                 {
                   role: 'user',

@@ -34,6 +34,7 @@ import {
   OFFICIAL_PHOTOS_SHEET_NAME,
   getSheetsConfig
 } from '../services/sheetsService';
+import { optimizeImageForUpload } from '../utils/imageOptimizer';
 import { ServiceTypeCategory } from '../types';
 import { formatCurrency } from '../utils/formatters';
 
@@ -80,7 +81,7 @@ export const DigitalizarOSModal: React.FC<DigitalizarOSModalProps> = ({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
 
-  const handleFileSelect = (file: File) => {
+  const handleFileSelect = async (file: File) => {
     if (!file.type.startsWith('image/')) {
       setErrorMessage('Por favor, selecione um arquivo de imagem válido (JPG, PNG, WEBP).');
       return;
@@ -89,6 +90,19 @@ export const DigitalizarOSModal: React.FC<DigitalizarOSModalProps> = ({
     setErrorMessage(null);
     setImageFile(file);
 
+    try {
+      // 1. Optimize mobile camera photo (downscale 12MP/48MP to max 1600px, reducing 12MB to ~350KB)
+      const optimized = await optimizeImageForUpload(file, 1600, 0.85);
+      if (optimized.base64) {
+        setImagePreview(optimized.base64);
+        processImageAndUploadDrive(optimized.base64, optimized.mimeType || 'image/jpeg', file.name);
+        return;
+      }
+    } catch (optErr) {
+      console.warn('Canvas optimization error, falling back to raw image reader:', optErr);
+    }
+
+    // Fallback: Read raw data URL if canvas optimization unavailable
     const reader = new FileReader();
     reader.onload = () => {
       const base64 = reader.result as string;
@@ -108,46 +122,103 @@ export const DigitalizarOSModal: React.FC<DigitalizarOSModalProps> = ({
     setDriveFolderUrl(folderUrl);
 
     try {
-      // 1. Run Gemini AI OCR extraction first
-      const ocrResult = await digitizePhysicalOS(base64, mimeType);
+      // 1. Attempt Gemini AI OCR extraction
+      let ocrResult: DigitizedOSResult | null = null;
+      let ocrFailureMessage: string | null = null;
+
+      try {
+        ocrResult = await digitizePhysicalOS(base64, mimeType);
+      } catch (ocrErr: any) {
+        console.warn('OCR extraction error, proceeding with Google Drive upload:', ocrErr);
+        ocrFailureMessage = ocrErr.message || 'Leitura por IA indisponível temporariamente.';
+      }
 
       // 2. Upload to Google Drive (Pasta Fotos_SO, ID 1vDmx3GHFH_4FWfcNkPaOX7m3aH_yuFjD) and link to Fotos_SO sheet
-      const cleanOS = (ocrResult.osNumber || `OS-${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '');
+      const generatedOS = `OS-${Date.now().toString().slice(-6)}`;
+      const cleanOS = (ocrResult?.osNumber || generatedOS).replace(/[^a-zA-Z0-9_-]/g, '');
+      const client = ocrResult?.clientName || 'Cliente WFS';
+      const serviceName = ocrResult?.title || 'Atendimento de Pista';
+
       const driveResult = await uploadPhotoToGoogleDrive(
         base64,
         customFileName || `Canhoto_${cleanOS}_${Date.now()}.jpg`,
         cleanOS,
-        ocrResult.clientName || 'Cliente WFS',
-        ocrResult.title || 'Atendimento de Pista'
+        client,
+        serviceName
       );
 
-      setExtractedData(ocrResult);
       setDriveStatus('success');
       setDriveFileUrl(driveResult.fileUrl);
       setDriveFileName(driveResult.fileName);
 
-      // Pre-fill form fields
-      setClientName(ocrResult.clientName || '');
-      setClientDocument(ocrResult.clientDocument || '');
-      setClientPhone(ocrResult.clientPhone || '');
-      setWorkLocation(ocrResult.workLocation || '');
-      setCategory(ocrResult.category || 'misto');
-      setTitle(ocrResult.title || '');
-      setDescription(ocrResult.description || '');
-      setScheduledDate(ocrResult.scheduledDate || new Date().toISOString().split('T')[0]);
-      setTechnicianName(ocrResult.technicianName || '');
-      setEquipmentItems(ocrResult.equipmentItems || []);
-      setLaborItems(ocrResult.laborItems || []);
-      setMaterialItems(ocrResult.materialItems || []);
-      setDiscount(ocrResult.discount || 0);
-      setAddition(ocrResult.addition || 0);
-      setNotes(ocrResult.observations || '');
+      if (ocrResult) {
+        setExtractedData(ocrResult);
+
+        // Pre-fill form fields
+        setClientName(ocrResult.clientName || '');
+        setClientDocument(ocrResult.clientDocument || '');
+        setClientPhone(ocrResult.clientPhone || '');
+        setWorkLocation(ocrResult.workLocation || '');
+        setCategory(ocrResult.category || 'misto');
+        setTitle(ocrResult.title || '');
+        setDescription(ocrResult.description || '');
+        setScheduledDate(ocrResult.scheduledDate || new Date().toISOString().split('T')[0]);
+        setTechnicianName(ocrResult.technicianName || '');
+        setEquipmentItems(ocrResult.equipmentItems || []);
+        setLaborItems(ocrResult.laborItems || []);
+        setMaterialItems(ocrResult.materialItems || []);
+        setDiscount(ocrResult.discount || 0);
+        setAddition(ocrResult.addition || 0);
+        setNotes(ocrResult.observations || '');
+      } else {
+        // Fallback default structure so user can review and edit with photo already in Google Drive!
+        const fallbackOS: DigitizedOSResult = {
+          osNumber: cleanOS,
+          clientName: '',
+          clientDocument: '',
+          clientPhone: '',
+          workLocation: 'Pátio / Pista WFS',
+          category: 'misto',
+          title: 'Atendimento com Canhoto / Documento Digitalizado',
+          description: `Documento e foto digitalizados da câmera e enviados com sucesso para a pasta do Google Drive (Fotos_SO).\n\nArquivo Drive: ${driveResult.fileName}\nLink: ${driveResult.fileUrl}`,
+          scheduledDate: new Date().toISOString().split('T')[0],
+          technicianName: '',
+          equipmentItems: [],
+          laborItems: [],
+          materialItems: [],
+          discount: 0,
+          addition: 0,
+          totalAmount: 0,
+          observations: `Foto arquivada na pasta Google Drive Fotos_SO (${OFFICIAL_DRIVE_FOLDER_ID}).`,
+          confidence: {
+            clientName: false,
+            clientDocument: false,
+            workLocation: false,
+            title: false,
+            scheduledDate: true,
+            technicianName: false,
+            totalAmount: false,
+            items: false,
+          },
+          uncertainReasons: {
+            ocr: ocrFailureMessage || 'Preencha os campos da OS manualmente a partir do canhoto.',
+          },
+        };
+
+        setExtractedData(fallbackOS);
+        setTitle(fallbackOS.title);
+        setDescription(fallbackOS.description);
+        setWorkLocation(fallbackOS.workLocation);
+        setScheduledDate(fallbackOS.scheduledDate);
+        setCategory('misto');
+        setNotes(fallbackOS.observations || '');
+      }
 
       setStep('review');
     } catch (err: any) {
-      console.error(err);
+      console.error('Error during image and drive processing:', err);
       setErrorMessage(
-        err.message || 'Não foi possível ler os dados da imagem. Verifique a iluminação e tente novamente.'
+        err.message || 'Não foi possível salvar a imagem no Google Drive. Verifique sua conexão e tente novamente.'
       );
       setDriveStatus('error');
       setStep('upload');
@@ -325,7 +396,9 @@ export const DigitalizarOSModal: React.FC<DigitalizarOSModalProps> = ({
                   capture="environment"
                   className="hidden"
                   onChange={(e) => {
-                    if (e.target.files?.[0]) handleFileSelect(e.target.files[0]);
+                    const file = e.target.files?.[0];
+                    e.target.value = '';
+                    if (file) handleFileSelect(file);
                   }}
                 />
               </button>
@@ -351,7 +424,9 @@ export const DigitalizarOSModal: React.FC<DigitalizarOSModalProps> = ({
                   accept="image/*"
                   className="hidden"
                   onChange={(e) => {
-                    if (e.target.files?.[0]) handleFileSelect(e.target.files[0]);
+                    const file = e.target.files?.[0];
+                    e.target.value = '';
+                    if (file) handleFileSelect(file);
                   }}
                 />
               </button>
