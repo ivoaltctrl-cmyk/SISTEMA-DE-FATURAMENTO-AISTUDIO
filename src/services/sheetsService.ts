@@ -280,7 +280,24 @@ export const uploadPhotoToGoogleDrive = async (
   const randomFileHash = Math.random().toString(36).substring(2, 12) + Math.random().toString(36).substring(2, 10);
   const driveFileUrl = `https://drive.google.com/file/d/1vDmx3GHFH_${cleanOS}_${randomFileHash}/view?usp=sharing`;
 
-  // If webhook is configured, dispatch sending to Google Apps Script / Drive Webhook to save in Drive folder and Fotos_SO sheet
+  // 1. Notify local API to record upload and broadcast event
+  try {
+    await fetch('/api/drive/upload-canhoto', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        imageBase64: base64Image,
+        fileName: targetFileName,
+        osNumber: cleanOS,
+        clientName: clientName || 'WFS Operacional',
+        serviceTitle: serviceTitle || 'Canhoto Enviado ao Drive',
+      }),
+    });
+  } catch (apiErr) {
+    console.warn('Backend drive notification, continuing with cloud link generation:', apiErr);
+  }
+
+  // 2. If webhook is configured, dispatch sending to Google Apps Script / Drive Webhook to save in Drive folder and Fotos_SO sheet
   if (cfg.webhookUrl && cfg.webhookUrl.startsWith('http')) {
     try {
       const response = await fetch(cfg.webhookUrl, {

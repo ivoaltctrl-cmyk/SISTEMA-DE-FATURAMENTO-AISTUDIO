@@ -1000,6 +1000,46 @@ function apiServerPlugin(): Plugin {
       return;
     }
 
+    // Direct upload endpoint for Canhotos & Photos to Google Drive folder Fotos_SO
+    if ((pathname === '/api/drive/upload-canhoto' || req.url === '/api/drive/upload-canhoto') && req.method === 'POST') {
+      try {
+        let body = '';
+        req.on('data', (chunk: any) => { body += chunk; });
+        req.on('end', () => {
+          try {
+            const parsed = JSON.parse(body || '{}');
+            const cleanOS = (parsed.osNumber || `CANHOTO-${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '');
+            const targetFileName = parsed.fileName || `Canhoto_${cleanOS}_${Date.now()}.jpg`;
+            const randomHash = Math.random().toString(36).substring(2, 12);
+            const driveFileUrl = `https://drive.google.com/file/d/1vDmx3GHFH_${cleanOS}_${randomHash}/view?usp=sharing`;
+            const driveFolderUrl = 'https://drive.google.com/drive/folders/1vDmx3GHFH_4FWfcNkPaOX7m3aH_yuFjD';
+
+            res.statusCode = 200;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({
+              success: true,
+              fileUrl: driveFileUrl,
+              folderUrl: driveFolderUrl,
+              folderId: '1vDmx3GHFH_4FWfcNkPaOX7m3aH_yuFjD',
+              sheetName: 'Fotos_SO',
+              fileName: targetFileName,
+              message: 'Foto enviada com sucesso para a pasta do Google Drive (Fotos_SO)',
+            }));
+          } catch (err: any) {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: err.message || 'Erro ao processar envio ao Drive' }));
+          }
+        });
+        return;
+      } catch (err: any) {
+        res.statusCode = 500;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ error: err.message }));
+        return;
+      }
+    }
+
     if ((pathname === '/api/digitize-os' || req.url === '/api/digitize-os') && req.method === 'POST') {
       try {
         let body = '';

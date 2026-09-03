@@ -202,7 +202,7 @@ export const FieldPortal: React.FC<FieldPortalProps> = ({
 
         {/* Hero Quick Launch Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-          {/* Card 1: 📸 OCR Scan Physical Ticket */}
+          {/* Card 1: 📸 Direct Photo Upload to Google Drive */}
           <div
             onClick={onOpenDigitalizar}
             className="bg-white hover:bg-red-50/40 p-5 rounded-3xl shadow-sm hover:shadow-md border-2 border-red-200 hover:border-red-500 cursor-pointer hover:scale-[1.01] active:scale-[0.99] transition-all group relative overflow-hidden"
@@ -210,13 +210,13 @@ export const FieldPortal: React.FC<FieldPortalProps> = ({
             <div className="relative z-10 flex items-center justify-between">
               <div className="space-y-1">
                 <span className="text-[10px] font-black uppercase tracking-widest bg-red-100 text-red-700 px-2.5 py-0.5 rounded-full inline-block mb-1 font-sans">
-                  Visão IA & Google Drive
+                  Google Drive • Fotos_SO
                 </span>
                 <h3 className="text-xl font-black text-slate-900 group-hover:text-red-700 transition-colors">
-                  Digitalizar OS de Papel
+                  Enviar Canhoto / Foto
                 </h3>
                 <p className="text-xs text-slate-600 max-w-[240px]">
-                  Tire uma foto do canhoto: a imagem vai direto para o Google Drive e os dados são preenchidos por IA.
+                  Tire uma foto na câmera: a imagem vai direto para a pasta do Google Drive para a IA processar. Sem digitação.
                 </p>
               </div>
 

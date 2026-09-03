@@ -198,29 +198,9 @@ const MainApp: React.FC = () => {
     setEditingOrder(null);
   };
 
-  const handleDigitalizeSuccess = (recognizedData: any) => {
-    setShowDigitalizarModal(false);
-    setEditingOrder({
-      ...recognizedData,
-      id: '',
-      osNumber:
-        recognizedData.osNumber ||
-        `OS-${new Date().getFullYear()}-${String(orders.length + 1).padStart(4, '0')}`,
-      status: 'aguardando_validacao',
-      createdBy: currentUser?.name || 'Técnico de Campo',
-      createdByRole: currentUser?.roleLabel || 'Operador de Campo',
-      createdOrigin: 'ocr_camera',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      executionDate: recognizedData.executionDate || new Date().toISOString().slice(0, 10),
-      items: recognizedData.items || [],
-      laborItems: recognizedData.laborItems || [],
-      photos: recognizedData.photos || [],
-      totalAmount: recognizedData.totalAmount || 0,
-      clientName: recognizedData.clientName || '',
-      clientId: recognizedData.clientId || '',
-    } as ServiceOrder);
-    setShowOSFormModal(true);
+  const handleDigitalizeSuccess = () => {
+    // Foto/canhoto enviado diretamente para o Google Drive (Pasta Fotos_SO).
+    // O processamento e leitura são feitos diretamente pela IA configurada na nuvem.
   };
 
   const handleNavigateToOSWithFilter = (status?: OSStatus) => {

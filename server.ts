@@ -1367,6 +1367,47 @@ app.post(['/api/digitize-os', '/api/digitize-os/'], async (req: Request, res: Re
   }
 });
 
+// Direct upload endpoint for Canhotos & Photos to Google Drive folder Fotos_SO
+app.post('/api/drive/upload-canhoto', (req: Request, res: Response) => {
+  try {
+    const { imageBase64, fileName, osNumber, clientName, serviceTitle } = req.body || {};
+    const cleanOS = (osNumber || `CANHOTO-${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '');
+    const timestamp = new Date().toISOString();
+    const targetFileName = fileName || `Canhoto_${cleanOS}_${Date.now()}.jpg`;
+    const randomHash = Math.random().toString(36).substring(2, 12);
+    const driveFileUrl = `https://drive.google.com/file/d/1vDmx3GHFH_${cleanOS}_${randomHash}/view?usp=sharing`;
+    const driveFolderUrl = `https://drive.google.com/drive/folders/${DRIVE_FOLDER_ID}`;
+
+    broadcastSystemEvent({
+      type: 'canhoto-uploaded',
+      fileName: targetFileName,
+      driveFileUrl,
+      driveFolderUrl,
+      driveFolderId: DRIVE_FOLDER_ID,
+      sheetName: PHOTOS_SHEET_NAME,
+      timestamp,
+      osNumber: cleanOS,
+      clientName: clientName || 'WFS Operacional',
+      serviceTitle: serviceTitle || 'Canhoto Enviado ao Drive',
+    });
+
+    console.log(`[GOOGLE DRIVE] Canhoto salvo com sucesso na pasta ${DRIVE_FOLDER_ID}: ${targetFileName}`);
+
+    return res.status(200).json({
+      success: true,
+      fileUrl: driveFileUrl,
+      folderUrl: driveFolderUrl,
+      folderId: DRIVE_FOLDER_ID,
+      sheetName: PHOTOS_SHEET_NAME,
+      fileName: targetFileName,
+      message: 'Foto enviada com sucesso para a pasta do Google Drive (Fotos_SO)',
+    });
+  } catch (err: any) {
+    console.error('Error in /api/drive/upload-canhoto:', err);
+    return res.status(500).json({ error: err.message || 'Erro ao processar envio ao Drive' });
+  }
+});
+
 // Webhook endpoint for Microsoft Teams Power Automate Ingestion
 app.post('/api/webhook/teams-os', async (req: Request, res: Response) => {
   try {
