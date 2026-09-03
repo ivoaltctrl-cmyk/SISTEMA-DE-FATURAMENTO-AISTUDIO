@@ -12,12 +12,7 @@ import {
   SignatureData
 } from '../types';
 import {
-  initialClients,
   initialCompany,
-  initialEquipments,
-  initialInvoices,
-  initialLaborServices,
-  initialOrders,
   initialUsers
 } from '../mockData';
 import {
@@ -34,7 +29,6 @@ import {
 import {
   mergeWithMasterUser,
   MASTER_ADMIN_USER,
-  isLegacyMockUser,
   fetchGlobalSystemState,
   publishGlobalSystemState,
 } from '../services/cloudSyncService';
@@ -177,23 +171,6 @@ const LOCAL_STORAGE_KEY_PREFIX = 'os_digital_app_';
 const DEFAULT_MASTER_PASSWORD = 'admin';
 const DEFAULT_EXECUTIVE_PASSWORD = 'admin';
 
-export const isLegacyMockOrder = (o: any): boolean => {
-  if (!o || !o.id) return false;
-  const id = String(o.id);
-  const client = String(o.clientName || '');
-  return (
-    id.startsWith('os-31877-') ||
-    id.startsWith('os-10') ||
-    id === 'os-1' ||
-    id === 'os-100' ||
-    client.includes('Construtora') ||
-    client.includes('Metalmecânica') ||
-    client.includes('Metalmecanica') ||
-    client.includes('EcoLog') ||
-    client.includes('InfraObras')
-  );
-};
-
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [company, setCompanyState] = useState<CompanyProfile>(() => {
     const saved = localStorage.getItem(`${LOCAL_STORAGE_KEY_PREFIX}company`);
@@ -202,8 +179,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [users, setUsers] = useState<AppUser[]>(() => {
     const saved = localStorage.getItem(`${LOCAL_STORAGE_KEY_PREFIX}users`);
-    const parsed = saved !== null ? JSON.parse(saved) : initialUsers;
-    return mergeWithMasterUser(parsed);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return mergeWithMasterUser(parsed);
+        }
+      } catch {}
+    }
+    return initialUsers;
   });
 
   const [currentUser, setCurrentUserState] = useState<AppUser>(() => {
@@ -211,7 +195,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
-        if (parsed && !isLegacyMockUser(parsed)) {
+        if (parsed && parsed.email) {
           return parsed;
         }
       } catch {}
@@ -221,35 +205,57 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [clients, setClients] = useState<Client[]>(() => {
     const saved = localStorage.getItem(`${LOCAL_STORAGE_KEY_PREFIX}clients`);
-    return saved !== null ? JSON.parse(saved) : initialClients;
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed;
+      } catch {}
+    }
+    return [];
   });
 
   const [equipments, setEquipments] = useState<Equipment[]>(() => {
     const saved = localStorage.getItem(`${LOCAL_STORAGE_KEY_PREFIX}equipments`);
-    return saved !== null ? JSON.parse(saved) : initialEquipments;
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed;
+      } catch {}
+    }
+    return [];
   });
 
   const [laborServices, setLaborServices] = useState<LaborService[]>(() => {
     const saved = localStorage.getItem(`${LOCAL_STORAGE_KEY_PREFIX}laborServices`);
-    return saved !== null ? JSON.parse(saved) : initialLaborServices;
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed;
+      } catch {}
+    }
+    return [];
   });
 
   const [orders, setOrders] = useState<ServiceOrder[]>(() => {
     const saved = localStorage.getItem(`${LOCAL_STORAGE_KEY_PREFIX}orders`);
-    if (saved !== null) {
+    if (saved) {
       try {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-          return parsed.filter((o: ServiceOrder) => !isLegacyMockOrder(o));
-        }
+        if (Array.isArray(parsed)) return parsed;
       } catch {}
     }
-    return initialOrders.filter((o: ServiceOrder) => !isLegacyMockOrder(o));
+    return [];
   });
 
   const [invoices, setInvoices] = useState<Invoice[]>(() => {
     const saved = localStorage.getItem(`${LOCAL_STORAGE_KEY_PREFIX}invoices`);
-    return saved !== null ? JSON.parse(saved) : initialInvoices;
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed;
+      } catch {}
+    }
+    return [];
   });
 
   // Maintenance mode (Tirar app do ar)
@@ -376,7 +382,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     localStorage.setItem(`${LOCAL_STORAGE_KEY_PREFIX}master_pwd`, masterPassword);
   }, [masterPassword]);
 
-  // Immediate startup purge of legacy demonstration mock users from local storage
+  // Ensure master user is maintained in users list
   useEffect(() => {
     try {
       const savedUsers = localStorage.getItem(`${LOCAL_STORAGE_KEY_PREFIX}users`);
@@ -388,15 +394,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             localStorage.setItem(`${LOCAL_STORAGE_KEY_PREFIX}users`, JSON.stringify(cleaned));
             setUsers(cleaned);
           }
-        }
-      }
-
-      const savedCurrent = localStorage.getItem(`${LOCAL_STORAGE_KEY_PREFIX}current_user`);
-      if (savedCurrent) {
-        const parsed = JSON.parse(savedCurrent);
-        if (isLegacyMockUser(parsed)) {
-          localStorage.setItem(`${LOCAL_STORAGE_KEY_PREFIX}current_user`, JSON.stringify(MASTER_ADMIN_USER));
-          setCurrentUserState(MASTER_ADMIN_USER);
         }
       }
     } catch {}
@@ -446,12 +443,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const ordensRes = await ordensApi.getAll();
         if (ordensRes.success && Array.isArray(ordensRes.orders) && ordensRes.orders.length > 0) {
           isRemoteOrdersUpdateRef.current = true;
-          const cleanOrders = ordensRes.orders.filter((o: ServiceOrder) => !isLegacyMockOrder(o));
-          setOrders(cleanOrders);
+          setOrders(ordensRes.orders);
           setLastAutoSyncTime(new Date());
+        } else {
+          // Trigger immediate Google Sheets sync if server cache has no orders
+          syncWithGoogleSheet(undefined, true).catch(() => {});
         }
       } catch (err) {
         console.warn('GET /api/ordens fallback:', err);
+        syncWithGoogleSheet(undefined, true).catch(() => {});
       }
 
       try {
@@ -502,7 +502,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (data.type === 'STATE_CHANGE' && data.appState) {
             if (Array.isArray(data.appState.orders)) {
               isRemoteOrdersUpdateRef.current = true;
-              setOrders(data.appState.orders.filter((o: ServiceOrder) => !isLegacyMockOrder(o)));
+              setOrders(data.appState.orders);
               setLastAutoSyncTime(new Date());
             }
             if (Array.isArray(data.appState.invoices)) {
@@ -540,7 +540,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             }
           } else if (ev.data?.type === 'LOCAL_ORDERS_UPDATE' && Array.isArray(ev.data.orders)) {
             isRemoteOrdersUpdateRef.current = true;
-            setOrders(ev.data.orders.filter((o: ServiceOrder) => !isLegacyMockOrder(o)));
+            setOrders(ev.data.orders);
             setLastAutoSyncTime(new Date());
           } else if (ev.data?.type === 'LOCAL_INVOICES_UPDATE' && Array.isArray(ev.data.invoices)) {
             isRemoteInvoicesUpdateRef.current = true;
@@ -1568,18 +1568,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return { success: true, message: 'Senha mestra alterada com sucesso!' };
   };
 
-  // Immediate purge of any obsolete mock orders from localStorage/state on startup
-  useEffect(() => {
-    setOrders((prev) => {
-      const cleaned = prev.filter((o) => !isLegacyMockOrder(o));
-      if (cleaned.length !== prev.length) {
-        localStorage.setItem(`${LOCAL_STORAGE_KEY_PREFIX}orders`, JSON.stringify(cleaned));
-        return cleaned;
-      }
-      return prev;
-    });
-  }, []);
-
   // Google Sheets Live Integration Actions
   const syncWithGoogleSheet = async (
     sheetUrlOrId?: string,
@@ -1593,10 +1581,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (result.success && result.orders.length > 0) {
         setOrders((prev) => {
           const existingMap = new Map<string, ServiceOrder>();
-          // Index existing orders, discarding any legacy mock dummy records
-          prev
-            .filter((o) => !isLegacyMockOrder(o))
-            .forEach((o) => existingMap.set(o.id, o));
+          // Index existing orders
+          prev.forEach((o) => existingMap.set(o.id, o));
 
           result.orders.forEach((newOrd) => {
             const existing = existingMap.get(newOrd.id);
@@ -1617,7 +1603,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             }
           });
 
-          const merged = Array.from(existingMap.values()).filter((o) => !isLegacyMockOrder(o));
+          const merged = Array.from(existingMap.values());
           // Sync merged to server state so all clients get it
           fetch('/api/state', {
             method: 'POST',
@@ -1843,13 +1829,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [orders]);
 
   const resetToSampleData = () => {
-    setCompanyState(initialCompany);
-    setUsers(initialUsers);
-    setClients(initialClients);
-    setEquipments(initialEquipments);
-    setLaborServices(initialLaborServices);
-    setOrders(initialOrders);
-    setInvoices(initialInvoices);
+    clearAllData('empty_database');
+    syncWithGoogleSheet(undefined, false).catch(() => {});
   };
 
   const clearOrders = () => {

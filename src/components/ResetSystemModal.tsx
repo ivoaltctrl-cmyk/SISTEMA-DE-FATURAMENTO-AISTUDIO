@@ -8,15 +8,15 @@ interface ResetSystemModalProps {
 }
 
 export const ResetSystemModal: React.FC<ResetSystemModalProps> = ({ isOpen, onClose }) => {
-  const { clearAllData, clearOrders, clearInvoices, resetToSampleData } = useApp();
-  const [selectedOption, setSelectedOption] = useState<'empty_all' | 'orders_invoices' | 'sample'>('empty_all');
+  const { clearAllData, clearOrders, clearInvoices, syncWithGoogleSheet } = useApp();
+  const [selectedOption, setSelectedOption] = useState<'empty_all' | 'orders_invoices' | 'resync_sheets'>('empty_all');
   const [confirmText, setConfirmText] = useState('');
   const [isSuccess, setIsSuccess] = useState(false);
   const [successMessage, setSuccessMessage] = useState('');
 
   if (!isOpen) return null;
 
-  const handleExecute = () => {
+  const handleExecute = async () => {
     if (selectedOption === 'empty_all') {
       if (confirmText.trim().toUpperCase() !== 'ZERAR') {
         alert('Por favor, digite a palavra ZERAR para confirmar a exclusão de todos os dados.');
@@ -27,9 +27,13 @@ export const ResetSystemModal: React.FC<ResetSystemModalProps> = ({ isOpen, onCl
     } else if (selectedOption === 'orders_invoices') {
       clearAllData('orders_and_invoices');
       setSuccessMessage('Todas as Ordens de Serviço e Faturas foram excluídas com sucesso!');
-    } else if (selectedOption === 'sample') {
-      resetToSampleData();
-      setSuccessMessage('Dados de exemplo e demonstração restaurados com sucesso!');
+    } else if (selectedOption === 'resync_sheets') {
+      try {
+        const res = await syncWithGoogleSheet();
+        setSuccessMessage(`Sincronização concluída! ${res.count} ordens atualizadas da planilha oficial.`);
+      } catch (err) {
+        setSuccessMessage('Sincronização acionada com o Google Sheets.');
+      }
     }
 
     setIsSuccess(true);
@@ -129,28 +133,28 @@ export const ResetSystemModal: React.FC<ResetSystemModalProps> = ({ isOpen, onCl
                 </div>
               </label>
 
-              {/* Option 3: Restore Demo Samples */}
+              {/* Option 3: Re-sync from Google Sheets */}
               <label
-                onClick={() => setSelectedOption('sample')}
+                onClick={() => setSelectedOption('resync_sheets')}
                 className={`flex items-start gap-3 p-3.5 rounded-2xl border cursor-pointer transition-all ${
-                  selectedOption === 'sample'
-                    ? 'border-blue-500 bg-blue-50/70 text-blue-950'
+                  selectedOption === 'resync_sheets'
+                    ? 'border-emerald-500 bg-emerald-50/70 text-emerald-950'
                     : 'border-slate-200 bg-slate-50 hover:bg-slate-100/70 text-slate-700'
                 }`}
               >
                 <input
                   type="radio"
                   name="reset_opt"
-                  checked={selectedOption === 'sample'}
-                  onChange={() => setSelectedOption('sample')}
-                  className="mt-0.5 text-blue-600 focus:ring-blue-500"
+                  checked={selectedOption === 'resync_sheets'}
+                  onChange={() => setSelectedOption('resync_sheets')}
+                  className="mt-0.5 text-emerald-600 focus:ring-emerald-500"
                 />
                 <div>
                   <span className="font-bold text-slate-900 block">
-                    🔄 Restaurar Dados de Exemplo (Demonstração)
+                    🔄 Forçar Re-sincronização do Google Sheets
                   </span>
                   <span className="text-[11px] text-slate-500 block mt-0.5">
-                    Recarrega os exemplos originais de OSs, LATAM, Azul e equipamentos para testes.
+                    Recarrega em tempo real todos os dados corporativos autênticos diretamente da planilha oficial.
                   </span>
                 </div>
               </label>
@@ -164,7 +168,7 @@ export const ResetSystemModal: React.FC<ResetSystemModalProps> = ({ isOpen, onCl
                   <span>Confirmação de Segurança Requerida:</span>
                 </div>
                 <p className="text-[11px] text-red-700">
-                  Para confirmar que deseja apagar todos os dados de exemplo, digite <strong>ZERAR</strong> no campo abaixo:
+                  Para confirmar que deseja apagar todos os dados locais em cache, digite <strong>ZERAR</strong> no campo abaixo:
                 </p>
                 <input
                   type="text"
@@ -193,13 +197,13 @@ export const ResetSystemModal: React.FC<ResetSystemModalProps> = ({ isOpen, onCl
                     ? 'bg-red-600 hover:bg-red-700 shadow-red-500/20'
                     : selectedOption === 'orders_invoices'
                     ? 'bg-amber-600 hover:bg-amber-700 shadow-amber-500/20'
-                    : 'bg-blue-600 hover:bg-blue-700 shadow-blue-500/20'
+                    : 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-500/20'
                 }`}
               >
                 {selectedOption === 'empty_all' && <Trash2 className="w-4 h-4" />}
                 {selectedOption === 'orders_invoices' && <Trash2 className="w-4 h-4" />}
-                {selectedOption === 'sample' && <RefreshCw className="w-4 h-4" />}
-                Confirmar Limpeza
+                {selectedOption === 'resync_sheets' && <RefreshCw className="w-4 h-4" />}
+                {selectedOption === 'resync_sheets' ? 'Sincronizar Agora' : 'Confirmar Limpeza'}
               </button>
             </div>
           </div>

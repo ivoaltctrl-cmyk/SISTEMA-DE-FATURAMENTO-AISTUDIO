@@ -20,40 +20,6 @@ const LOCAL_STORAGE_KEY_PREFIX = 'os_digital_app_';
 const CLOUD_STORAGE_OBJECT_ID = 'ff8081819ff5b11001a039dc91721f03';
 const CLOUD_STORAGE_API = `https://api.restful-api.dev/objects/${CLOUD_STORAGE_OBJECT_ID}`;
 
-// Helper to detect and discard fictitious demonstration mock users
-export const isLegacyMockUser = (u: any): boolean => {
-  if (!u) return false;
-  const email = String(u.email || '').toLowerCase().trim();
-  const id = String(u.id || '').trim();
-  const name = String(u.name || '').toLowerCase().trim();
-
-  // Master Admin Ivo is real, authoritative, and ALWAYS protected
-  if (email === 'ivoaltctrl@gmail.com' || id === 'usr-master-ivo' || name.includes('ivo (master')) {
-    return false;
-  }
-
-  // Demonstration mock users hardcoded in previous prototypes
-  return (
-    email === 'mariana.costa@wfs.aero' ||
-    email === 'roberto.santos@wfs.aero' ||
-    email === 'carlos.silva@wfs.aero' ||
-    email === 'lucas.mendes@wfs.aero' ||
-    email === 'ti.brasil@wfs.aero' ||
-    email === 'amanda.cortez@wfs.aero' ||
-    id === 'usr-1' ||
-    id === 'usr-2' ||
-    id === 'usr-3' ||
-    id === 'usr-4' ||
-    id === 'usr-5' ||
-    id === 'usr-6' ||
-    name === 'mariana costa' ||
-    name === 'roberto santos' ||
-    name === 'carlos silva' ||
-    name === 'lucas mendes' ||
-    name === 'ti administrador'
-  );
-};
-
 // Fallback Master User definition that is ALWAYS guaranteed to exist
 export const MASTER_ADMIN_USER: AppUser = {
   id: 'usr-master-ivo',
@@ -79,11 +45,9 @@ export const MASTER_ADMIN_USER: AppUser = {
   avatarColor: 'bg-slate-900',
 };
 
-// Merge users ensuring Master Admin is never lost and demo mock users are purged
+// Merge users ensuring Master Admin is preserved alongside real corporate users from Sheets
 export const mergeWithMasterUser = (usersList: AppUser[]): AppUser[] => {
-  const cleanList = Array.isArray(usersList)
-    ? usersList.filter((u) => !isLegacyMockUser(u))
-    : [];
+  const cleanList = Array.isArray(usersList) ? usersList : [];
 
   if (cleanList.length === 0) {
     return [MASTER_ADMIN_USER];

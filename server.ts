@@ -108,37 +108,6 @@ let serverUsers: ServerUser[] = [
   },
 ];
 
-function isLegacyMockUser(u: any): boolean {
-  if (!u) return false;
-  const email = String(u.email || '').toLowerCase().trim();
-  const id = String(u.id || '').trim();
-  const name = String(u.name || '').toLowerCase().trim();
-
-  if (email === 'ivoaltctrl@gmail.com' || id === 'usr-master-ivo' || name.includes('ivo (master')) {
-    return false;
-  }
-
-  return (
-    email === 'mariana.costa@wfs.aero' ||
-    email === 'roberto.santos@wfs.aero' ||
-    email === 'carlos.silva@wfs.aero' ||
-    email === 'lucas.mendes@wfs.aero' ||
-    email === 'ti.brasil@wfs.aero' ||
-    email === 'amanda.cortez@wfs.aero' ||
-    id === 'usr-1' ||
-    id === 'usr-2' ||
-    id === 'usr-3' ||
-    id === 'usr-4' ||
-    id === 'usr-5' ||
-    id === 'usr-6' ||
-    name === 'mariana costa' ||
-    name === 'roberto santos' ||
-    name === 'carlos silva' ||
-    name === 'lucas mendes' ||
-    name === 'ti administrador'
-  );
-}
-
 // Helper to sanitize user object before sending to client (strip passwords)
 const sanitizeUser = (u: ServerUser) => {
   const { password, ...rest } = u;
@@ -697,9 +666,7 @@ function parseUsersFromCsv(text: string): ServerUser[] {
       avatarColor: isMaster ? 'bg-slate-900' : 'bg-red-600',
     };
 
-    if (!isLegacyMockUser(user)) {
-      users.push(user);
-    }
+    users.push(user);
   });
 
   return users;
@@ -721,9 +688,8 @@ async function fetchAndParseSpreadsheetUsers(): Promise<ServerUser[]> {
   }
 }
 
-// Get All Users (Sanitized, Purged from Demo Users, Synced with Sheets)
+// Get All Users (Sanitized, Synced with Sheets)
 app.get('/api/users', async (_req: Request, res: Response) => {
-  serverUsers = serverUsers.filter((u) => !isLegacyMockUser(u));
   if (serverUsers.length <= 1) {
     try {
       const sheetUsers = await fetchAndParseSpreadsheetUsers();
@@ -739,11 +705,11 @@ app.get('/api/users', async (_req: Request, res: Response) => {
             map.set(key, u);
           }
         });
-        serverUsers = Array.from(map.values()).filter((u) => !isLegacyMockUser(u));
+        serverUsers = Array.from(map.values());
       }
     } catch {}
   }
-  const sanitized = serverUsers.filter((u) => !isLegacyMockUser(u)).map(sanitizeUser);
+  const sanitized = serverUsers.map(sanitizeUser);
   return res.status(200).json({ success: true, users: sanitized });
 });
 
@@ -803,7 +769,7 @@ app.post('/api/users', (req: Request, res: Response) => {
     serverUsers.push(newUser);
     broadcastSystemEvent({
       type: 'USERS_CHANGE',
-      users: serverUsers.filter((u) => !isLegacyMockUser(u)).map(sanitizeUser),
+      users: serverUsers.map(sanitizeUser),
       timestamp: new Date().toISOString(),
     });
     return res.status(201).json({
@@ -822,7 +788,7 @@ app.get('/api/users/sync-sheet', async (_req: Request, res: Response) => {
     const sheetUsers = await fetchAndParseSpreadsheetUsers();
     if (sheetUsers.length > 0) {
       const map = new Map<string, ServerUser>();
-      serverUsers.filter((u) => !isLegacyMockUser(u)).forEach((u) => map.set(u.email.toLowerCase(), u));
+      serverUsers.forEach((u) => map.set(u.email.toLowerCase(), u));
       sheetUsers.forEach((u) => {
         const key = u.email.toLowerCase();
         const existing = map.get(key);
@@ -832,7 +798,7 @@ app.get('/api/users/sync-sheet', async (_req: Request, res: Response) => {
           map.set(key, u);
         }
       });
-      serverUsers = Array.from(map.values()).filter((u) => !isLegacyMockUser(u));
+      serverUsers = Array.from(map.values());
 
       broadcastSystemEvent({
         type: 'USERS_CHANGE',
@@ -842,10 +808,10 @@ app.get('/api/users/sync-sheet', async (_req: Request, res: Response) => {
       });
     }
 
-    const sanitized = serverUsers.filter((u) => !isLegacyMockUser(u)).map(sanitizeUser);
+    const sanitized = serverUsers.map(sanitizeUser);
     return res.status(200).json({ success: true, users: sanitized, count: sanitized.length, source: 'google_sheets_tab' });
   } catch (err: any) {
-    const sanitized = serverUsers.filter((u) => !isLegacyMockUser(u)).map(sanitizeUser);
+    const sanitized = serverUsers.map(sanitizeUser);
     return res.status(200).json({ success: true, users: sanitized, count: sanitized.length, source: 'fallback' });
   }
 });

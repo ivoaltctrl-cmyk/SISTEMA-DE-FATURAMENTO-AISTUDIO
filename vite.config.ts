@@ -50,37 +50,6 @@ let devUsers: any[] = [
   },
 ];
 
-function isLegacyMockUser(u: any): boolean {
-  if (!u) return false;
-  const email = String(u.email || '').toLowerCase().trim();
-  const id = String(u.id || '').trim();
-  const name = String(u.name || '').toLowerCase().trim();
-
-  if (email === 'ivoaltctrl@gmail.com' || id === 'usr-master-ivo' || name.includes('ivo (master')) {
-    return false;
-  }
-
-  return (
-    email === 'mariana.costa@wfs.aero' ||
-    email === 'roberto.santos@wfs.aero' ||
-    email === 'carlos.silva@wfs.aero' ||
-    email === 'lucas.mendes@wfs.aero' ||
-    email === 'ti.brasil@wfs.aero' ||
-    email === 'amanda.cortez@wfs.aero' ||
-    id === 'usr-1' ||
-    id === 'usr-2' ||
-    id === 'usr-3' ||
-    id === 'usr-4' ||
-    id === 'usr-5' ||
-    id === 'usr-6' ||
-    name === 'mariana costa' ||
-    name === 'roberto santos' ||
-    name === 'carlos silva' ||
-    name === 'lucas mendes' ||
-    name === 'ti administrador'
-  );
-}
-
 function sanitizeUser(u: any) {
   const { password, ...safe } = u;
   return safe;
@@ -234,23 +203,6 @@ function parseOrdersFromCsv(text: string): any[] {
   return orders;
 }
 
-function isLegacyMockOrder(o: any): boolean {
-  if (!o || !o.id) return false;
-  const id = String(o.id);
-  const client = String(o.clientName || '');
-  return (
-    id.startsWith('os-31877-') ||
-    id.startsWith('os-10') ||
-    id === 'os-1' ||
-    id === 'os-100' ||
-    client.includes('Construtora') ||
-    client.includes('Metalmecânica') ||
-    client.includes('Metalmecanica') ||
-    client.includes('EcoLog') ||
-    client.includes('InfraObras')
-  );
-}
-
 function parseUsersFromCsv(text: string): any[] {
   if (!text) return [];
   const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
@@ -322,9 +274,7 @@ function parseUsersFromCsv(text: string): any[] {
       avatarColor: isMaster ? 'bg-slate-900' : 'bg-red-600',
     };
 
-    if (!isLegacyMockUser(user)) {
-      users.push(user);
-    }
+    users.push(user);
   });
 
   return users;
@@ -349,7 +299,7 @@ async function autoSyncGoogleSheetUsers() {
     const parsedUsers = parseUsersFromCsv(text);
     if (parsedUsers.length > 0) {
       const existingMap = new Map<string, any>();
-      devUsers.filter((u: any) => !isLegacyMockUser(u)).forEach((u: any) => existingMap.set(u.email.toLowerCase(), u));
+      devUsers.forEach((u: any) => existingMap.set(u.email.toLowerCase(), u));
 
       parsedUsers.forEach((newU: any) => {
         const key = newU.email.toLowerCase();
@@ -361,7 +311,7 @@ async function autoSyncGoogleSheetUsers() {
         }
       });
 
-      const updated = Array.from(existingMap.values()).filter((u: any) => !isLegacyMockUser(u));
+      const updated = Array.from(existingMap.values());
       devUsers = updated;
 
       broadcastSystemEvent({
@@ -403,7 +353,6 @@ async function autoSyncGoogleSheets() {
       if (parsed.length > 0) {
         const existingMap = new Map<string, any>();
         (sharedAppState.orders || [])
-          .filter((o: any) => !isLegacyMockOrder(o))
           .forEach((o: any) => existingMap.set(o.id, o));
 
         parsed.forEach((newOrd: any) => {
@@ -422,7 +371,7 @@ async function autoSyncGoogleSheets() {
           }
         });
 
-        sharedAppState.orders = Array.from(existingMap.values()).filter((o: any) => !isLegacyMockOrder(o));
+        sharedAppState.orders = Array.from(existingMap.values());
         sharedAppState.updatedAt = new Date().toISOString();
         sharedAppState.lastSheetSync = new Date().toISOString();
 
@@ -618,7 +567,7 @@ function apiServerPlugin(): Plugin {
             const parsedUsers = parseUsersFromCsv(csv);
             if (parsedUsers.length > 0) {
               const existingMap = new Map<string, any>();
-              devUsers.filter((u: any) => !isLegacyMockUser(u)).forEach((u: any) => existingMap.set(u.email.toLowerCase(), u));
+              devUsers.forEach((u: any) => existingMap.set(u.email.toLowerCase(), u));
 
               parsedUsers.forEach((newU: any) => {
                 const key = newU.email.toLowerCase();
@@ -630,7 +579,7 @@ function apiServerPlugin(): Plugin {
                 }
               });
 
-              devUsers = Array.from(existingMap.values()).filter((u: any) => !isLegacyMockUser(u));
+              devUsers = Array.from(existingMap.values());
 
               broadcastSystemEvent({
                 type: 'USERS_CHANGE',
@@ -648,7 +597,6 @@ function apiServerPlugin(): Plugin {
       } catch (err: any) {
         console.warn('Error syncing users in vite dev:', err);
       }
-      devUsers = devUsers.filter((u: any) => !isLegacyMockUser(u));
       res.statusCode = 200;
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({ success: true, users: devUsers.map(sanitizeUser), count: devUsers.length, source: 'memory' }));
@@ -717,7 +665,7 @@ function apiServerPlugin(): Plugin {
         try {
           const parsed = JSON.parse(body || '{}');
           if (Array.isArray(parsed.orders)) {
-            sharedAppState.orders = parsed.orders.filter((o: any) => !isLegacyMockOrder(o));
+            sharedAppState.orders = parsed.orders;
           }
           if (Array.isArray(parsed.invoices)) sharedAppState.invoices = parsed.invoices;
           if (Array.isArray(parsed.clients)) sharedAppState.clients = parsed.clients;
@@ -859,7 +807,6 @@ function apiServerPlugin(): Plugin {
 
     // Users CRUD Endpoints
     if (req.url === '/api/users' && req.method === 'GET') {
-      devUsers = devUsers.filter((u: any) => !isLegacyMockUser(u));
       res.statusCode = 200;
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({ success: true, users: devUsers.map(sanitizeUser) }));

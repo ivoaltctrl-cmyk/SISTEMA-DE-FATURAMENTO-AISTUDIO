@@ -26,7 +26,6 @@ export const SettingsManager: React.FC = () => {
   const {
     company,
     setCompany,
-    resetToSampleData,
     orders,
     invoices,
     clients,

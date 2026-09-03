@@ -25,30 +25,6 @@ export const PhotoUploader: React.FC<PhotoUploaderProps> = ({
   const [category, setCategory] = useState<PhotoEvidence['category']>('depois');
   const [notes, setNotes] = useState('');
 
-  // Sample quick templates if user wants sample photo
-  const samplePhotos = [
-    {
-      title: 'Equipamento instalado no local',
-      category: 'equipamento' as const,
-      url: 'https://images.unsplash.com/photo-1581092160607-ee22621dd758?auto=format&fit=crop&w=600&q=80',
-    },
-    {
-      title: 'Início da atividade / Check-in',
-      category: 'antes' as const,
-      url: 'https://images.unsplash.com/photo-1541888946425-d0fbb18086f6?auto=format&fit=crop&w=600&q=80',
-    },
-    {
-      title: 'Execução do serviço em andamento',
-      category: 'durante' as const,
-      url: 'https://images.unsplash.com/photo-1504307651254-35680f356dfd?auto=format&fit=crop&w=600&q=80',
-    },
-    {
-      title: 'Trabalho finalizado e aprovado',
-      category: 'depois' as const,
-      url: 'https://images.unsplash.com/photo-1581092335397-9583fe92d232?auto=format&fit=crop&w=600&q=80',
-    },
-  ];
-
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -240,29 +216,6 @@ export const PhotoUploader: React.FC<PhotoUploaderProps> = ({
                       onChange={handleFileChange}
                       className="hidden"
                     />
-                  </div>
-
-                  <div>
-                    <span className="text-xs font-semibold text-slate-500 block mb-1.5">
-                      Ou selecione um exemplo de teste rápido:
-                    </span>
-                    <div className="grid grid-cols-2 gap-2">
-                      {samplePhotos.map((s, idx) => (
-                        <button
-                          key={idx}
-                          type="button"
-                          onClick={() => {
-                            setSelectedImage(s.url);
-                            setTitle(s.title);
-                            setCategory(s.category);
-                          }}
-                          className="text-left p-2 border border-slate-200 rounded-xl hover:border-blue-400 hover:bg-blue-50/50 transition-all flex items-center gap-2"
-                        >
-                          <img src={s.url} alt="" className="w-8 h-8 rounded-lg object-cover" />
-                          <span className="text-[11px] font-medium text-slate-700 line-clamp-1">{s.title}</span>
-                        </button>
-                      ))}
-                    </div>
                   </div>
                 </div>
               ) : (

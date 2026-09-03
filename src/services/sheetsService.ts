@@ -1,5 +1,4 @@
 import { ServiceOrder, Invoice, Client, OSStatus, ServiceTypeCategory, AppUser, UserPrivilege } from '../types';
-import { isLegacyMockUser } from './cloudSyncService';
 
 export const OFFICIAL_SHEET_URL =
   'https://docs.google.com/spreadsheets/d/1qT1rXOefT2lWHh7Z7wcxXE3RnnfWPu1Qe0xyI2HI7hk/edit?gid=0#gid=0';
@@ -889,9 +888,7 @@ export const parseSheetRowsToUsers = (rows: string[][]): AppUser[] => {
       avatarColor: isMaster ? 'bg-slate-900' : 'bg-red-600',
     };
 
-    if (!isLegacyMockUser(user)) {
-      users.push(user);
-    }
+    users.push(user);
   }
 
   return users;
@@ -915,7 +912,7 @@ export const fetchSheetUsers = async (): Promise<{
       if (data.success && Array.isArray(data.users) && data.users.length > 0) {
         return {
           success: true,
-          users: data.users.filter((u: any) => !isLegacyMockUser(u)),
+          users: data.users,
           source: 'backend_proxy',
         };
       }
