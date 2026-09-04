@@ -1579,40 +1579,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const result = await fetchOrdersFromGoogleSheet(sheetUrlOrId);
       if (result.success && result.orders.length > 0) {
-        setOrders((prev) => {
-          const existingMap = new Map<string, ServiceOrder>();
-          // Index existing orders
-          prev.forEach((o) => existingMap.set(o.id, o));
+        // Replace orders with fresh sheet data so front-end faithfully mirrors the spreadsheet
+        const freshOrders = result.orders;
+        setOrders(freshOrders);
+        localStorage.setItem(`${LOCAL_STORAGE_KEY_PREFIX}orders`, JSON.stringify(freshOrders));
 
-          result.orders.forEach((newOrd) => {
-            const existing = existingMap.get(newOrd.id);
-            if (existing) {
-              existingMap.set(newOrd.id, {
-                ...existing,
-                ...newOrd,
-                clientSignature: existing.clientSignature || newOrd.clientSignature,
-                photos: existing.photos && existing.photos.length > 0 ? existing.photos : newOrd.photos,
-                checklist: existing.checklist && existing.checklist.length > 0 ? existing.checklist : newOrd.checklist,
-                status:
-                  existing.status === 'concluida' || existing.status === 'cancelada'
-                    ? existing.status
-                    : newOrd.status,
-              });
-            } else {
-              existingMap.set(newOrd.id, newOrd);
-            }
-          });
-
-          const merged = Array.from(existingMap.values());
-          // Sync merged to server state so all clients get it
-          fetch('/api/state', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ orders: merged }),
-          }).catch(() => {});
-
-          return merged;
-        });
+        // Sync fresh orders to server state so all other clients get the exact same state
+        fetch('/api/state', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ orders: freshOrders }),
+        }).catch(() => {});
 
         setLastAutoSyncTime(new Date());
 
@@ -1670,12 +1647,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (parsed.length === 0) {
         return { success: false, message: 'Nenhuma ordem identificada no texto/CSV fornecido.', count: 0 };
       }
-      setOrders((prev) => {
-        const existingMap = new Map<string, ServiceOrder>();
-        prev.forEach((o) => existingMap.set(o.id, o));
-        parsed.forEach((newOrd) => existingMap.set(newOrd.id, newOrd));
-        return Array.from(existingMap.values());
-      });
+      setOrders(parsed);
+      localStorage.setItem(`${LOCAL_STORAGE_KEY_PREFIX}orders`, JSON.stringify(parsed));
+      fetch('/api/state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orders: parsed }),
+      }).catch(() => {});
 
       return {
         success: true,
@@ -1849,6 +1827,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setInvoices([]);
       localStorage.setItem(`${LOCAL_STORAGE_KEY_PREFIX}orders`, JSON.stringify([]));
       localStorage.setItem(`${LOCAL_STORAGE_KEY_PREFIX}invoices`, JSON.stringify([]));
+      fetch('/api/state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orders: [], invoices: [] }),
+      }).catch(() => {});
     } else {
       setOrders([]);
       setInvoices([]);
@@ -1860,6 +1843,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       localStorage.setItem(`${LOCAL_STORAGE_KEY_PREFIX}clients`, JSON.stringify([]));
       localStorage.setItem(`${LOCAL_STORAGE_KEY_PREFIX}equipments`, JSON.stringify([]));
       localStorage.setItem(`${LOCAL_STORAGE_KEY_PREFIX}laborServices`, JSON.stringify([]));
+      fetch('/api/state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orders: [], invoices: [], clients: [], equipments: [], laborServices: [] }),
+      }).catch(() => {});
     }
   };
 
