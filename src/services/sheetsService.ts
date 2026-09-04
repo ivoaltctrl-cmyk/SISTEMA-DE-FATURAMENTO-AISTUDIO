@@ -291,47 +291,127 @@ export const uploadPhotoToGoogleDrive = async (
     throw new Error('Nenhuma imagem capturada para envio.');
   }
 
-  // 1. Upload através do backend local que faz proxy para o Google Apps Script
-  // Isso evita bloqueios de CORS, permite seguir redirects do Google e retorna erro real se a pasta ou script falhar
-  let backendResult: any = null;
-  try {
-    const localCtrl = new AbortController();
-    const localTimeout = setTimeout(() => localCtrl.abort(), 25000);
-    const backendRes = await fetch('/api/drive/upload-canhoto', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: localCtrl.signal,
-      body: JSON.stringify({
-        imageBase64: base64Image,
-        fileName: targetFileName,
-        osNumber: cleanOS,
-        clientName: clientName || 'WFS Operacional',
-        serviceTitle: serviceTitle || 'Canhoto Enviado ao Drive',
-        webhookUrl: cfg.webhookUrl,
-        driveFolderId: folderId,
-      }),
-    });
-    clearTimeout(localTimeout);
+  const payload = {
+    action: 'upload_drive_canhoto',
+    imageBase64: base64Image,
+    fileName: targetFileName,
+    osNumber: cleanOS,
+    clientName: clientName || 'WFS Operacional',
+    serviceTitle: serviceTitle || 'Canhoto Enviado ao Drive',
+    driveFolderId: folderId,
+    webhookUrl: cfg.webhookUrl,
+  };
 
-    if (backendRes.ok) {
-      backendResult = await backendRes.json();
-    } else {
-      const errData = await backendRes.json().catch(() => null);
-      throw new Error(errData?.error || `Erro HTTP ${backendRes.status} no envio para o Drive`);
+  let uploadSuccess = false;
+  let resultFileUrl = '';
+  let resultMessage = '';
+  let lastErrorDetail = '';
+
+  // 1. CANAL PRINCIPAL: Envio DIRETO para o Google Apps Script Webhook (se configurado)
+  // Funciona no Preview, Cloud Run, Produção e Mobile sem depender de proxy intermediário
+  if (cfg.webhookUrl && cfg.webhookUrl.startsWith('http')) {
+    try {
+      const gasCtrl = new AbortController();
+      const gasTimeout = setTimeout(() => gasCtrl.abort(), 35000);
+
+      const gasRes = await fetch(cfg.webhookUrl, {
+        method: 'POST',
+        headers: {
+          // text/plain evita requisição preflight OPTIONS (CORS) que o Google Apps Script não aceita
+          'Content-Type': 'text/plain;charset=utf-8',
+        },
+        body: JSON.stringify(payload),
+        signal: gasCtrl.signal,
+      });
+      clearTimeout(gasTimeout);
+
+      if (gasRes.ok) {
+        const gasData = await gasRes.json().catch(() => null);
+        if (gasData && (gasData.success || gasData.driveUrl || gasData.fileUrl)) {
+          uploadSuccess = true;
+          resultFileUrl = gasData.fileUrl || gasData.driveFileUrl || gasData.driveUrl || `https://drive.google.com/drive/folders/${folderId}`;
+          resultMessage = gasData.mensagem || gasData.message || 'Foto salva com sucesso na pasta Fotos_SO do Google Drive!';
+        } else if (gasData && (gasData.erro || gasData.error)) {
+          lastErrorDetail = gasData.erro || gasData.error;
+        }
+      } else {
+        lastErrorDetail = `Webhook do Google Apps Script retornou HTTP ${gasRes.status}.`;
+      }
+    } catch (gasErr: any) {
+      console.warn('Tentativa de envio direto via Webhook falhou, tentando canal local:', gasErr);
+      lastErrorDetail = gasErr.message || '';
     }
-  } catch (apiErr: any) {
-    console.error('Falha no upload para o Google Drive:', apiErr);
-    throw new Error(apiErr.message || 'Falha ao salvar a imagem na pasta do Google Drive.');
+  }
+
+  // 2. CANAL SECUNDÁRIO: Backend Proxy local (/api/drive/upload-canhoto)
+  if (!uploadSuccess) {
+    try {
+      const localCtrl = new AbortController();
+      const localTimeout = setTimeout(() => localCtrl.abort(), 25000);
+
+      const backendRes = await fetch('/api/drive/upload-canhoto', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: localCtrl.signal,
+        body: JSON.stringify(payload),
+      });
+      clearTimeout(localTimeout);
+
+      if (backendRes.ok) {
+        const backendResult = await backendRes.json().catch(() => null);
+        if (backendResult && backendResult.success) {
+          uploadSuccess = true;
+          resultFileUrl = backendResult.fileUrl || `https://drive.google.com/drive/folders/${folderId}`;
+          resultMessage = backendResult.message || 'Foto salva com sucesso na pasta do Google Drive!';
+        }
+      } else if (backendRes.status === 405 || backendRes.status === 404) {
+        // HTTP 405 ocorre quando a hospedagem web estática (Shared App / Cloud Run preview) não aceita métodos POST em rotas locais
+        if (!cfg.webhookUrl) {
+          throw new Error(
+            'URL do Webhook do Google Apps Script não configurada. Na versão web/compartilhada, configure o link do Webhook na aba Governança > Sincronização para enviar fotos diretamente ao Google Drive.'
+          );
+        } else {
+          throw new Error(
+            'O servidor web estático recusou a rota local (HTTP 405). Verifique se o Webhook do Google Apps Script está ativo e implantado na versão mais recente.'
+          );
+        }
+      } else {
+        const errData = await backendRes.json().catch(() => null);
+        throw new Error(errData?.error || `Erro HTTP ${backendRes.status} no envio para o Drive`);
+      }
+    } catch (backendErr: any) {
+      console.error('Falha no upload via proxy:', backendErr);
+      if (!uploadSuccess) {
+        const msg = backendErr.message || '';
+        if (msg.includes('405') || msg.includes('Method Not Allowed')) {
+          throw new Error(
+            'Servidor Web Estático (HTTP 405): Para salvar arquivos no Drive nesta versão compartilhada, configure a URL do Webhook do Google Apps Script na aba Governança > Sincronização Google Sheets.'
+          );
+        }
+        throw new Error(
+          backendErr.message ||
+          lastErrorDetail ||
+          'Falha ao salvar a imagem na pasta do Google Drive. Verifique a URL do Webhook nas configurações.'
+        );
+      }
+    }
+  }
+
+  if (!uploadSuccess) {
+    throw new Error(
+      lastErrorDetail ||
+      'Não foi possível salvar o arquivo na pasta do Drive. Verifique a URL do Webhook em Governança > Sincronização.'
+    );
   }
 
   return {
     success: true,
-    fileUrl: backendResult?.fileUrl || `https://drive.google.com/drive/folders/${folderId}`,
+    fileUrl: resultFileUrl || `https://drive.google.com/drive/folders/${folderId}`,
     folderUrl: folderUrl,
     folderId: folderId,
     sheetName: photosSheet,
     fileName: targetFileName,
-    message: backendResult?.message || `Imagem salva com sucesso na pasta de entrada do Drive (ID: ${folderId}). O Robô IA Vision iniciará a leitura.`,
+    message: resultMessage || `Imagem salva com sucesso na pasta de entrada do Drive (ID: ${folderId}). O Robô IA Vision iniciará a leitura.`,
   };
 };
 

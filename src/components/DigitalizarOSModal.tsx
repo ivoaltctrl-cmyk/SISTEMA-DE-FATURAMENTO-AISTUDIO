@@ -219,6 +219,18 @@ export const DigitalizarOSModal: React.FC<DigitalizarOSModalProps> = ({
                 </div>
               </div>
 
+              {!getSheetsConfig().webhookUrl && (
+                <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3.5 text-xs text-amber-900 flex items-start gap-2.5">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-bold">URL do Webhook do Google Apps Script não detectada</p>
+                    <p className="text-[11px] text-amber-800 mt-0.5 leading-relaxed">
+                      Para salvar o arquivo diretamente no Google Drive na versão web/compartilhada, verifique se a URL da implantação do Apps Script está preenchida na aba <strong>Governança &gt; Sincronização Google Sheets</strong>.
+                    </p>
+                  </div>
+                </div>
+              )}
+
               {errorMessage && (
                 <div className="bg-rose-50 border border-rose-200 rounded-2xl p-4 text-xs text-rose-800 flex items-start gap-2.5">
                   <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
@@ -465,18 +477,27 @@ export const DigitalizarOSModal: React.FC<DigitalizarOSModalProps> = ({
                 <h3 className="text-base font-black text-slate-900">
                   Não foi possível enviar ao Google Drive
                 </h3>
-                <p className="text-xs text-rose-700 mt-1 max-w-sm mx-auto">
+                <p className="text-xs text-rose-700 mt-2 max-w-md mx-auto leading-relaxed bg-rose-50 p-3 rounded-xl border border-rose-200">
                   {errorMessage || 'Ocorreu uma falha na conexão. Tente novamente.'}
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={handleResetForNextPhoto}
-                className="inline-flex items-center gap-2 px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-colors cursor-pointer"
-              >
-                <RefreshCw className="w-4 h-4" />
-                Tentar Novamente
-              </button>
+              <div className="flex flex-wrap items-center justify-center gap-2.5 pt-2">
+                <button
+                  type="button"
+                  onClick={handleResetForNextPhoto}
+                  className="inline-flex items-center gap-2 px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-colors cursor-pointer"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                  Tentar Novamente
+                </button>
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="inline-flex items-center gap-2 px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition-colors cursor-pointer"
+                >
+                  Fechar
+                </button>
+              </div>
             </div>
           )}
 
