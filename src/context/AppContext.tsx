@@ -1016,9 +1016,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setOrders((prev) => [newOrder, ...prev]);
 
-    // Auto-save to Google Sheets via Webhook
-    pushSingleOrderToGoogleSheet(newOrder);
-
+    // O front NÃO grava linhas na planilha. O ROBO_IA.gs é o único responsável pelas 18 colunas.
     return newOrder;
   };
 

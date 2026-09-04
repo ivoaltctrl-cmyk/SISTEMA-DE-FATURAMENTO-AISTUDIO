@@ -109,31 +109,12 @@ export const fetchSheetSystemStatus = async (): Promise<SheetSystemStatusResult>
   };
 };
 
-// Auto Push single order to Google Sheets if Webhook is active
+// Auto Push single order to Google Sheets (DESATIVADO: O ROBO_IA.gs é o único responsável pela escrita na planilha)
 export const pushSingleOrderToGoogleSheet = async (
-  order: ServiceOrder
+  _order: ServiceOrder
 ): Promise<boolean> => {
-  const cfg = getSheetsConfig();
-  if (!cfg.webhookUrl || !cfg.webhookUrl.startsWith('http')) return false;
-
-  try {
-    const singleRow = convertOrdersToSheetRows([order]);
-    await fetch(cfg.webhookUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      mode: 'no-cors',
-      body: JSON.stringify({
-        action: 'append_order',
-        order: singleRow[0] || order,
-        data: singleRow,
-        timestamp: new Date().toISOString(),
-      }),
-    });
-    return true;
-  } catch (e) {
-    console.warn('Auto sync order to Google Sheets failed:', e);
-    return false;
-  }
+  // O front NÃO grava linhas na planilha. O ROBO_IA.gs é o único responsável por varrer a pasta Fotos_OS e gravar linhas.
+  return false;
 };
 
 // Update Google Sheets "Status" tab via Apps Script Webhook or Backend Proxy
@@ -306,15 +287,17 @@ export const uploadPhotoToGoogleDrive = async (
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const targetFileName = fileName || `Canhoto_${cleanOS}_${timestamp}.jpg`;
 
-  // Generate unique Google Drive File URL inside DRIVE_FOLDER_ID
-  const randomFileHash = Math.random().toString(36).substring(2, 12) + Math.random().toString(36).substring(2, 10);
-  const driveFileUrl = `https://drive.google.com/file/d/1vDmx3GHFH_${cleanOS}_${randomFileHash}/view?usp=sharing`;
+  if (!base64Image) {
+    throw new Error('Nenhuma imagem capturada para envio.');
+  }
 
-  // 1. Notify local API to record upload and broadcast event
+  // 1. Upload através do backend local que faz proxy para o Google Apps Script
+  // Isso evita bloqueios de CORS, permite seguir redirects do Google e retorna erro real se a pasta ou script falhar
+  let backendResult: any = null;
   try {
     const localCtrl = new AbortController();
-    const localTimeout = setTimeout(() => localCtrl.abort(), 4000);
-    await fetch('/api/drive/upload-canhoto', {
+    const localTimeout = setTimeout(() => localCtrl.abort(), 25000);
+    const backendRes = await fetch('/api/drive/upload-canhoto', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       signal: localCtrl.signal,
@@ -324,51 +307,31 @@ export const uploadPhotoToGoogleDrive = async (
         osNumber: cleanOS,
         clientName: clientName || 'WFS Operacional',
         serviceTitle: serviceTitle || 'Canhoto Enviado ao Drive',
+        webhookUrl: cfg.webhookUrl,
+        driveFolderId: folderId,
       }),
     });
     clearTimeout(localTimeout);
-  } catch (apiErr) {
-    console.warn('Backend drive notification, continuing with cloud link generation:', apiErr);
-  }
 
-  // 2. If webhook is configured, dispatch sending to Google Apps Script / Drive Webhook to save in Drive folder and Fotos_SO sheet
-  if (cfg.webhookUrl && cfg.webhookUrl.startsWith('http')) {
-    try {
-      const webhookCtrl = new AbortController();
-      const webhookTimeout = setTimeout(() => webhookCtrl.abort(), 5000);
-      const response = await fetch(cfg.webhookUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        mode: 'no-cors',
-        signal: webhookCtrl.signal,
-        body: JSON.stringify({
-          action: 'upload_drive_canhoto',
-          driveFolderId: folderId,
-          sheetName: photosSheet,
-          fileName: targetFileName,
-          imageBase64: base64Image,
-          osNumber: cleanOS,
-          clientName: clientName || 'Cliente WFS',
-          serviceTitle: serviceTitle || 'Atendimento de Pista',
-          folderUrl: folderUrl,
-          driveFileUrl: driveFileUrl,
-        }),
-      });
-      clearTimeout(webhookTimeout);
-      console.log('Dispatched photo upload to Google Drive Webhook (Fotos_SO)', response);
-    } catch (err) {
-      console.warn('Webhook upload error, continuing with cloud link generation', err);
+    if (backendRes.ok) {
+      backendResult = await backendRes.json();
+    } else {
+      const errData = await backendRes.json().catch(() => null);
+      throw new Error(errData?.error || `Erro HTTP ${backendRes.status} no envio para o Drive`);
     }
+  } catch (apiErr: any) {
+    console.error('Falha no upload para o Google Drive:', apiErr);
+    throw new Error(apiErr.message || 'Falha ao salvar a imagem na pasta do Google Drive.');
   }
 
   return {
     success: true,
-    fileUrl: driveFileUrl,
+    fileUrl: backendResult?.fileUrl || `https://drive.google.com/drive/folders/${folderId}`,
     folderUrl: folderUrl,
     folderId: folderId,
     sheetName: photosSheet,
     fileName: targetFileName,
-    message: `Imagem arquivada com sucesso no Google Drive (Pasta Fotos_SO, ID: ${folderId}) e vinculada à planilha Fotos_SO.`,
+    message: backendResult?.message || `Imagem salva com sucesso na pasta de entrada do Drive (ID: ${folderId}). O Robô IA Vision iniciará a leitura.`,
   };
 };
 
@@ -837,16 +800,78 @@ export const fetchOrdersFromGoogleSheet = async (
     console.warn('Direct GViz fetch error:', err);
   }
 
-  // 3. Try Webhook doGet if configured
+  // 3. Try Webhook doGet if configured (tries get_lancamentos first, falls back to get_orders)
   if (cfg.webhookUrl && cfg.webhookUrl.startsWith('http')) {
     try {
       const webhookUrlWithAction = cfg.webhookUrl.includes('?')
-        ? `${cfg.webhookUrl}&action=get_orders`
-        : `${cfg.webhookUrl}?action=get_orders`;
+        ? `${cfg.webhookUrl}&action=get_lancamentos`
+        : `${cfg.webhookUrl}?action=get_lancamentos`;
 
       const res = await fetch(webhookUrlWithAction);
       if (res.ok) {
         const data = await res.json();
+        
+        // Handle new get_lancamentos response structure (dados: [...])
+        if (data && Array.isArray(data.dados) && data.dados.length > 0) {
+          const mappedOrders: ServiceOrder[] = data.dados.map((d: any, idx: number) => {
+            const rawOS = String(d.osNumber || `318${idx + 1}`);
+            const cleanNum = rawOS.replace(/[^0-9]/g, '');
+            const id = `sheet-os-${cleanNum || idx + 1}-${idx}`;
+            
+            const isFaturada = String(d.status || '').toUpperCase().includes('FATURAD');
+            const isPaga = String(d.status || '').toUpperCase().includes('PAG');
+            const isCancelada = String(d.status || '').toUpperCase().includes('CANCEL');
+            const isConcluida = String(d.status || '').toUpperCase().includes('CONCLU');
+
+            let orderStatus: ServiceOrder['status'] = 'concluida';
+            if (isPaga) orderStatus = 'paga';
+            else if (isFaturada) orderStatus = 'faturada';
+            else if (isCancelada) orderStatus = 'cancelada';
+            else if (isConcluida) orderStatus = 'concluida';
+            else orderStatus = 'em_andamento';
+
+            return {
+              id,
+              osNumber: rawOS,
+              clientName: d.cliente || 'Cliente WFS',
+              clientDocument: d.cnpj || '',
+              workLocation: d.local || 'Aeroporto / Pista',
+              category: d.categoria || 'Serviços Auxiliares de Transporte Aéreo',
+              title: d.tituloServico || 'Atendimento de Pista',
+              description: d.equipamentos || d.tituloServico || '',
+              totalAmount: Number(d.valorTotal) || 0,
+              status: orderStatus,
+              technicianName: d.agente || d.responsavel || 'Operador WFS',
+              agentName: d.agente || '',
+              startTime: d.horaInicio || '',
+              endTime: d.horaFim || '',
+              quantityHours: d.quantidade || '',
+              filledBy: d.responsavel || '',
+              clientSignature: d.assinatura ? { signerName: d.assinatura, signedAt: new Date().toISOString() } : undefined,
+              photos: d.fotoCanhotoUrl ? [{ id: `photo-${idx}`, url: d.fotoCanhotoUrl, title: 'Canhoto Drive', category: 'canhoto', timestamp: new Date().toISOString() }] : [],
+              invoiceNumber: d.numeroFatura && d.numeroFatura !== '-' ? d.numeroFatura : undefined,
+              scheduledDate: d.dataHora || new Date().toISOString(),
+              createdAt: new Date().toISOString(),
+              items: [
+                {
+                  id: `item-${idx}-1`,
+                  name: d.equipamentos || d.tituloServico || 'Serviço de Pista',
+                  quantity: 1,
+                  unitPrice: Number(d.valorTotal) || 0,
+                  totalPrice: Number(d.valorTotal) || 0,
+                }
+              ],
+            };
+          });
+
+          return {
+            success: true,
+            message: `${mappedOrders.length} lançamentos sincronizados via Webhook (Aba Lançamentos Campo)!`,
+            orders: mappedOrders,
+          };
+        }
+
+        // Fallback for legacy get_orders format
         if (data && Array.isArray(data.orders) && data.orders.length > 0) {
           return {
             success: true,
@@ -1111,427 +1136,323 @@ export const exportOrdersToCSV = (orders: ServiceOrder[]) => {
   document.body.removeChild(link);
 };
 
-// Generate updated Google Apps Script Code matching EXACTLY the 18 columns in the screenshot
-export const generateGoogleAppsScriptCode = (
-  appUrl: string = typeof window !== 'undefined' ? window.location.origin : '',
-  companyName: string = 'WFS - A SATS COMPANY',
+// 1. TRIGGER ROBÔ IA VIA WEBHOOK
+export const triggerRobotExecution = async (webhookUrl?: string): Promise<{ success: boolean; message: string; details?: any }> => {
+  const cfg = getSheetsConfig();
+  const targetUrl = webhookUrl || cfg.webhookUrl;
+  if (!targetUrl || !targetUrl.startsWith('http')) {
+    return {
+      success: false,
+      message: 'URL do Webhook do Google Apps Script não configurada nas preferências.',
+    };
+  }
+
+  try {
+    const urlWithAction = targetUrl.includes('?')
+      ? `${targetUrl}&action=exec_robot`
+      : `${targetUrl}?action=exec_robot`;
+
+    const res = await fetch(urlWithAction);
+    if (!res.ok) {
+      return {
+        success: false,
+        message: `Servidor retornou status HTTP ${res.status}. Verifique se a implantação está ativa como App da Web.`,
+      };
+    }
+
+    const data = await res.json();
+    return {
+      success: data.sucesso !== false,
+      message: data.mensagem || (data.sucesso ? 'Robô IA executado com sucesso!' : data.erro || 'Falha na execução do robô.'),
+      details: data,
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      message: 'Erro de comunicação ao disparar robô IA: ' + (err.message || String(err)),
+    };
+  }
+};
+
+// 2. CÓDIGO 1: ROBÔ IA VISION WFS / ORBITAL (ROBO_IA.gs)
+export const generateRoboIaScriptCode = (
+  companyName: string = 'Orbital Serviços Auxiliares de Transporte Aéreo LTDA',
   ownerEmail: string = 'ivoaltctrl@gmail.com'
 ) => {
-  const fieldUrl = appUrl.includes('?') ? `${appUrl}&mode=campo` : `${appUrl}?mode=campo`;
-
   return `/**
  * ============================================================================
- * GOOGLE APPS SCRIPT: SISTEMA WFS | PAINEL DE CONTROLE DE PISTA (18 COLUNAS)
+ * CÓDIGO 1: ROBÔ IA VISION WFS / ORBITAL (ROBO_IA.gs)
+ * ============================================================================
+ * ORDEM DE EXECUÇÃO:
+ * 1. Varre a pasta de entrada no Drive e detecta imagem/PDF
+ * 2. Extrai dados linha por linha via IA Gemini Vision
+ * 3. Grava as 18 colunas na aba "Lançamentos Campo"
+ * 4. Move o arquivo para a subpasta "Processados" após gravação confirmada
  * ============================================================================
  * EMPRESA: ${companyName}
- * PROPRIETÁRIO COM PRIVILÉGIOS TOTAIS: ${ownerEmail}
- * 
- * INSTRUÇÕES DE INSTALAÇÃO:
- * 1. Na planilha Google: Acesse 'Extensões' > 'Apps Script'.
- * 2. Apague o código padrão e cole todo este código abaixo.
- * 3. Clique em Salvar (ícone de disquete).
- * 4. Execute a função 'configurarAbaLancamentos' para criar os botões e as 18 colunas.
- * 5. Para ativar como Webhook/API: Clique em 'Implantar' > 'Nova Implantação' > 'App da Web',
- *    escolha 'Qualquer pessoa' em quem tem acesso, e copie a URL gerada para o painel.
+ * PROPRIETÁRIO: ${ownerEmail}
+ * ============================================================================
  */
 
 var WFS_CONFIG = {
   COMPANY_NAME: "${companyName}",
-  PRIMARY_COLOR: "#991B1B",
-  BANNER_COLOR: "#0F172A",
-  OWNER_EMAIL: "${ownerEmail}",
-  WEB_APP_URL: "${fieldUrl}",
-  SHEET_NAME: "Lançamentos Campo",
-  PHOTOS_SHEET_NAME: "Fotos_SO",
+  PRIMARY_COLOR: "#991B1B", // Vermelho WFS Corporativo
+  
+  // ID Oficial da Pasta Fotos_OS no Google Drive
   DRIVE_FOLDER_ID: "1vDmx3GHFH_4FWfcNkPaOX7m3aH_yuFjD",
-  DRIVE_FOLDER_URL: "https://drive.google.com/drive/folders/1vDmx3GHFH_4FWfcNkPaOX7m3aH_yuFjD"
+  PROCESSED_SUBFOLDER_NAME: "Processados",
+  
+  // Cole sua chave Gemini aqui OU configure via Script Properties (GEMINI_API_KEY)
+  GEMINI_API_KEY: "",
+  
+  SHEET_NAME: "Lançamentos Campo",
+  MAX_FILES_PER_RUN: 10 // Limite seguro por lote para evitar timeout
 };
 
-// 1. INICIALIZAÇÃO AUTOMÁTICA AO ABRIR A PLANILHA
-function onOpen() {
-  var ui = SpreadsheetApp.getUi();
-  var userEmail = Session.getActiveUser().getEmail() || Session.getEffectiveUser().getEmail();
-  var isOwner = (userEmail.toLowerCase() === WFS_CONFIG.OWNER_EMAIL.toLowerCase()) || (userEmail === "");
-
-  try {
-    configurarAbaLancamentos();
-    configurarAbaFotosSO();
-    configurarAbaStatus();
-  } catch (e) {}
-
-  var menu = ui.createMenu("⚡ WFS - Portal Campo");
+/**
+ * FUNÇÃO PRINCIPAL DO ROBÔ (Pode ser acionada por Gatilho de Tempo - Ex: a cada 5 ou 10 minutos)
+ */
+function executarRoboLeituraPasta() {
+  var logs = [];
+  var processadosCount = 0;
   
-  menu.addItem("⚡ Abrir WFS - Portal Campo & Pista (Janela Interna)", "abrirPortalCampoModal")
-      .addItem("📋 Abrir Painel Lateral de Lançamentos (Sidebar)", "abrirPortalCampoSidebar")
-      .addItem("📷 Digitalizar Foto da OS / Canhoto (Janela Interna)", "abrirDigitalizadorFotoModal")
-      .addSeparator()
-      .addItem("🟢 Abrir Sistema no Front (Liberar Geral)", "abrirSistemaGeral")
-      .addItem("🔴 Fechar Sistema no Front (Tirar do Ar)", "fecharSistemaGeral")
-      .addItem("⚙️ Configurar Aba 'Status'", "configurarAbaStatus")
-      .addSeparator()
-      .addItem("📂 Abrir Pasta Google Drive (Fotos_SO)", "abrirPastaDriveFotosSO")
-      .addItem("🖼️ Configurar Aba 'Fotos_SO'", "configurarAbaFotosSO")
-      .addItem("📊 Atualizar Estrutura & 18 Colunas", "configurarAbaLancamentos");
-
-  if (isOwner) {
-    menu.addSeparator()
-        .addItem("🔒 Bloquear Planilha (Apenas Proprietário)", "bloquearPlanilhaExclusivoProprietario")
-        .addItem("🔓 Desbloquear Planilha para Edição Geral", "desbloquearPlanilha");
-  }
-
-  menu.addToUi();
-}
-
-// Funções de Controle de Status da Planilha
-function abrirSistemaGeral() {
-  atualizarStatusPlanilha("ABERTO", Session.getActiveUser().getEmail() || WFS_CONFIG.OWNER_EMAIL);
-  SpreadsheetApp.getUi().alert("🟢 SISTEMA ABERTO: O acesso ao sistema está liberado no Front-End e em todos os dispositivos!");
-}
-
-function fecharSistemaGeral() {
-  atualizarStatusPlanilha("FECHADO", Session.getActiveUser().getEmail() || WFS_CONFIG.OWNER_EMAIL);
-  SpreadsheetApp.getUi().alert("🔴 SISTEMA FECHADO: O front-end agora bloqueia todas as telas e solicita senha de administrador!");
-}
-
-function atualizarStatusPlanilha(novoStatus, atualizadoPor) {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName("Status") || configurarAbaStatus();
-  var statusUpper = (novoStatus || "ABERTO").toUpperCase();
-  var timestamp = Utilities.formatDate(new Date(), "America/Sao_Paulo", "dd/MM/yyyy HH:mm:ss");
-  var user = atualizadoPor || WFS_CONFIG.OWNER_EMAIL;
-
-  sheet.getRange("A2").setValue(statusUpper);
-  sheet.getRange("B2").setValue(timestamp);
-  sheet.getRange("C2").setValue(user);
-  sheet.getRange("D2").setValue(statusUpper === "FECHADO" ? "Sistema temporariamente fechado pela Gestão." : "Sistema operacional e aberto.");
-
-  var statusCell = sheet.getRange("A2");
-  if (statusUpper === "FECHADO") {
-    statusCell.setBackground("#FEE2E2").setFontColor("#991B1B").setFontWeight("bold");
-  } else {
-    statusCell.setBackground("#DCFCE7").setFontColor("#166534").setFontWeight("bold");
-  }
-
-  return { status: statusUpper, timestamp: timestamp, user: user };
-}
-
-function configurarAbaStatus() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName("Status");
-  if (!sheet) {
-    sheet = ss.insertSheet("Status");
-  }
-
-  sheet.getRange("A1:D1").setValues([["STATUS_SISTEMA", "DATA_HORA_ATUALIZACAO", "ATUALIZADO_POR", "MENSAGEM_AVISO"]])
-       .setBackground("#0F172A")
-       .setFontColor("#FFFFFF")
-       .setFontWeight("bold")
-       .setHorizontalAlignment("center");
-
-  if (!sheet.getRange("A2").getValue()) {
-    sheet.getRange("A2").setValue("ABERTO");
-    sheet.getRange("B2").setValue(Utilities.formatDate(new Date(), "America/Sao_Paulo", "dd/MM/yyyy HH:mm:ss"));
-    sheet.getRange("C2").setValue(WFS_CONFIG.OWNER_EMAIL);
-    sheet.getRange("D2").setValue("Sistema operacional e aberto.");
-  }
-
-  sheet.setColumnWidth(1, 180);
-  sheet.setColumnWidth(2, 220);
-  sheet.setColumnWidth(3, 240);
-  sheet.setColumnWidth(4, 300);
-
-  return sheet;
-}
-
-// 2. GATILHO DE CLIQUE NAS CÉLULAS/BOTÕES DA PLANILHA (Linha 2)
-function onSelectionChange(e) {
-  if (!e || !e.range) return;
   try {
-    var sheet = e.range.getSheet();
-    if (sheet.getName() !== WFS_CONFIG.SHEET_NAME && sheet.getName() !== WFS_CONFIG.PHOTOS_SHEET_NAME) return;
+    var pastaOrigem = DriveApp.getFolderById(WFS_CONFIG.DRIVE_FOLDER_ID);
+    var pastaDestino = obterOuCriarSubpastaProcessados(pastaOrigem);
     
-    var row = e.range.getRow();
-    var col = e.range.getColumn();
+    // Obter arquivos suportados (Imagens e PDFs)
+    var arquivos = pastaOrigem.getFiles();
     
-    if (row === 2 && sheet.getName() === WFS_CONFIG.SHEET_NAME) {
-      if (col >= 1 && col <= 4) {
-        abrirPortalCampoModal();
-      } else if (col >= 5 && col <= 7) {
-        abrirDigitalizadorFotoModal();
-      } else if (col >= 8 && col <= 11) {
-        abrirPortalCampoSidebar();
-      } else if (col >= 12 && col <= 18) {
-        SpreadsheetApp.getUi().alert("🔒 GOVERNANÇA WFS: Apenas o Proprietário (" + WFS_CONFIG.OWNER_EMAIL + ") pode alterar fórmulas e estrutura.");
+    while (arquivos.hasNext() && processadosCount < WFS_CONFIG.MAX_FILES_PER_RUN) {
+      var arquivo = arquivos.next();
+      var mimeType = arquivo.getMimeType();
+      var nomeArquivo = arquivo.getName();
+      
+      // Filtra apenas imagens e PDFs
+      if (mimeType.indexOf("image/") === 0 || mimeType === "application/pdf") {
+        Logger.log(">>> [ROBÔ IA] Processando arquivo: " + nomeArquivo);
+        
+        // 1. Extrai os dados linha a linha com IA Multimodal Vision
+        var dadosExtraidos = extrairDadosOSLinhaPorLinhaComGemini(arquivo);
+        
+        if (dadosExtraidos && dadosExtraidos.linhas && dadosExtraidos.linhas.length > 0) {
+          // 2. Grava as 18 colunas oficiais na aba "Lançamentos Campo"
+          var gravadas = gravarMultiplasLinhasOS(dadosExtraidos, arquivo.getUrl());
+          Logger.log(">>> [ROBÔ IA] Gravadas " + gravadas + " linhas para o arquivo: " + nomeArquivo);
+          
+          // 3. Move o arquivo para a subpasta \\"Processados\\" após gravação
+          arquivo.moveTo(pastaDestino);
+          Logger.log(">>> [ROBÔ IA] Arquivo movido com sucesso para a pasta 'Processados'.");
+          
+          processadosCount++;
+          logs.push({ arquivo: nomeArquivo, linhasGravadas: gravadas, status: "OK" });
+        } else {
+          Logger.log(">>> [ROBÔ IA] Aviso: Não foi possível extrair dados válidos de: " + nomeArquivo);
+          logs.push({ arquivo: nomeArquivo, linhasGravadas: 0, status: "FALHA_LEITURA" });
+        }
       }
     }
-  } catch (err) {}
-}
-
-// 3. MODAIS INTERNOS & LINKS
-function abrirPastaDriveFotosSO() {
-  var html = '<script>window.open("' + WFS_CONFIG.DRIVE_FOLDER_URL + '", "_blank");google.script.host.close();</script>';
-  SpreadsheetApp.getUi().showModalDialog(HtmlService.createHtmlOutput(html), "Abrindo Google Drive...");
-}
-
-function abrirPortalCampoModal() {
-  var htmlContent = gerarHtmlPortalModoCampo();
-  var htmlOutput = HtmlService.createHtmlOutput(htmlContent)
-    .setWidth(1100)
-    .setHeight(780)
-    .setTitle("WFS - Portal de Campo & Lançamento de OS");
-  
-  SpreadsheetApp.getUi().showModalDialog(htmlOutput, "⚡ WFS - Portal Campo & Pista");
-}
-
-function abrirPortalCampoSidebar() {
-  var htmlContent = gerarHtmlPortalModoCampo(true);
-  var htmlOutput = HtmlService.createHtmlOutput(htmlContent)
-    .setTitle("⚡ WFS Campo & Pista");
-  
-  SpreadsheetApp.getUi().showSidebar(htmlOutput);
-}
-
-function abrirDigitalizadorFotoModal() {
-  var htmlContent = gerarHtmlDigitalizadorFoto();
-  var htmlOutput = HtmlService.createHtmlOutput(htmlContent)
-    .setWidth(720)
-    .setHeight(620)
-    .setTitle("📷 WFS - Digitalizar Foto para Fotos_SO (Drive: " + WFS_CONFIG.DRIVE_FOLDER_ID + ")");
-  
-  SpreadsheetApp.getUi().showModalDialog(htmlOutput, "Digitalizador de OS (Foto / Câmera)");
-}
-
-// 4. SALVAMENTO DIRETO NA PLANILHA NAS 18 COLUNAS
-function salvarLancamentoNaPlanilha(dados) {
-  try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheet = ss.getSheetByName(WFS_CONFIG.SHEET_NAME) || configurarAbaLancamentos();
     
-    var numOS = dados.osNumber || ("318" + Math.floor(10 + Math.random() * 90));
-    var dataHora = dados.data || Utilities.formatDate(new Date(), "America/Sao_Paulo", "dd/MM/yyyy HH:mm");
-    var cliente = dados.cliente || "ITA AIRWAYS";
-    var doc = dados.documento || "";
-    var local = dados.local || "GRU";
-    var categoria = dados.categoria || "Serviços Auxiliares de Transp";
-    var servico = dados.servico || "CANCELAMENTO DE VOO AZ675";
-    var itens = dados.itens || servico;
-    var valor = parseFloat(dados.valor || 0);
-    var status = dados.status || "CONCLUÍDA (CAMPO)";
-    var agente = dados.agente || dados.tecnico || "AMANDA APARECIDA VASCO CORTEZ 14286";
-    var horaInicio = dados.horaInicio || "14:34";
-    var horaFim = dados.horaFim || "20:10";
-    var quantidade = dados.quantidade || "-";
-    var responsavel = dados.responsavel || "Amanda Aparecida Vasco Cortez";
-    var assinatura = dados.assinante ? ("Assinado por: " + dados.assinante) : "Assinado no Campo";
-    var fotoOS = dados.fotoUrl || WFS_CONFIG.DRIVE_FOLDER_URL;
-    var fatura = dados.fatura || "-";
+    return {
+      sucesso: true,
+      arquivosProcessados: processadosCount,
+      detalhes: logs,
+      mensagem: "Robô IA executou com sucesso. Total de arquivos processados: " + processadosCount
+    };
     
-    var novaLinha = [
-      numOS,        // 1: Número OS
-      dataHora,     // 2: Data / Hora
-      cliente,      // 3: Cliente / Empresa
-      doc,          // 4: CNPJ / CPF
-      local,        // 5: Local / Pista / Terminal
-      categoria,    // 6: Categoria
-      servico,      // 7: Título do Serviço
-      itens,        // 8: Equipamentos / Operadores
-      valor,        // 9: Valor Total (R$)
-      status,       // 10: Status Operacional
-      agente,       // 11: Nome Do Agente ou Serviço Executado
-      horaInicio,   // 12: Hora Início
-      horaFim,      // 13: Hora Fim
-      quantidade,   // 14: Quantidade
-      responsavel,  // 15: Responsável pelo Preenchimento
-      assinatura,   // 16: Assinatura do Cliente
-      fotoOS,       // 17: Foto do Canhoto
-      fatura        // 18: Nº da Fatura
+  } catch (err) {
+    Logger.log(">>> [ROBÔ IA] ERRO CRÍTICO: " + err.toString());
+    return { sucesso: false, erro: err.toString() };
+  }
+}
+
+/**
+ * Extração de dados estruturados com Gemini Multimodal Vision
+ */
+function extrairDadosOSLinhaPorLinhaComGemini(arquivo) {
+  var apiKey = WFS_CONFIG.GEMINI_API_KEY || PropertiesService.getScriptProperties().getProperty("GEMINI_API_KEY");
+  if (!apiKey) {
+    throw new Error("Chave GEMINI_API_KEY não configurada no WFS_CONFIG ou Script Properties.");
+  }
+
+  var base64Data = Utilities.base64Encode(arquivo.getBlob().getBytes());
+  var mimeType = arquivo.getMimeType();
+
+  var prompt = [
+    "Você é um auditor e especialista em OCR do setor de Ground Handling e Faturamento da WFS / Orbital.",
+    "Analise cuidadosamente este canhoto/ordem de serviço e extraia todas as informações linha por linha.",
+    "O documento pode conter múltiplos atendimentos/linhas de faturamento.",
+    "Retorne ESTRITAMENTE um objeto JSON válido, sem texto introdutório, sem tags markdown, no seguinte formato:",
+    "{",
+    '  "numeroOS": "string",',
+    '  "data": "DD/MM/AAAA",',
+    '  "cliente": "string (ex: ITA AIRWAYS, LATAM, AZUL, AMERICAN)",',
+    '  "cnpj": "string",',
+    '  "local": "string (ex: GRU, GIG, Pista 09L)",',
+    '  "categoria": "string",',
+    '  "servicoTitulo": "string",',
+    '  "responsavel": "string",',
+    '  "assinatura": "string",',
+    '  "linhas": [',
+    "    {",
+    '      "equipamentoServico": "string",',
+    '      "quantidade": "string ou número",',
+    '      "horaInicio": "HH:MM",',
+    '      "horaFim": "HH:MM",',
+    '      "valor": número,',
+    '      "agente": "string",',
+    '      "status": "CONCLUÍDA"',
+    "    }",
+    "  ]",
+    "}"
+  ].join("\\n");
+
+  var url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + apiKey;
+
+  var payload = {
+    contents: [
+      {
+        parts: [
+          { text: prompt },
+          {
+            inlineData: {
+              mimeType: mimeType,
+              data: base64Data
+            }
+          }
+        ]
+      }
+    ],
+    generationConfig: {
+      temperature: 0.1,
+      responseMimeType: "application/json"
+    }
+  };
+
+  var options = {
+    method: "post",
+    contentType: "application/json",
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  var response = UrlFetchApp.fetch(url, options);
+  if (response.getResponseCode() !== 200) {
+    // Tenta fallback com modelo gemini-1.5-flash
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + apiKey;
+    response = UrlFetchApp.fetch(url, options);
+    if (response.getResponseCode() !== 200) {
+      throw new Error("Erro na API Gemini (" + response.getResponseCode() + "): " + response.getContentText());
+    }
+  }
+
+  var resJson = JSON.parse(response.getContentText());
+  var rawText = resJson.candidates[0].content.parts[0].text;
+  
+  rawText = rawText.replace(new RegExp("^" + String.fromCharCode(96, 96, 96) + "json\\\\s*", "i"), "")
+                   .replace(new RegExp("^" + String.fromCharCode(96, 96, 96) + "\\\\s*", "i"), "")
+                   .replace(new RegExp("\\\\s*" + String.fromCharCode(96, 96, 96) + "$"), "").trim();
+  
+  return JSON.parse(rawText);
+}
+
+/**
+ * Grava as linhas extraídas nas 18 colunas oficiais da aba "Lançamentos Campo"
+ */
+function gravarMultiplasLinhasOS(dadosOS, fotoUrl) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(WFS_CONFIG.SHEET_NAME) || configurarAbaLancamentos();
+  
+  var numOS = dadosOS.numeroOS || ("318" + Math.floor(10 + Math.random() * 90));
+  var dataHora = dadosOS.data || Utilities.formatDate(new Date(), "America/Sao_Paulo", "dd/MM/yyyy HH:mm");
+  var cliente = dadosOS.cliente || "WFS AIRLINES";
+  var doc = dadosOS.cnpj || "";
+  var local = dadosOS.local || "GRU";
+  var categoria = dadosOS.categoria || "Serviços Auxiliares de Transporte Aéreo";
+  var tituloServico = dadosOS.servicoTitulo || "Atendimento de Pista / Carga";
+  var responsavel = dadosOS.responsavel || "Equipe de Campo WFS";
+  var assinatura = dadosOS.assinatura || "Assinado no Campo";
+  var linkFoto = fotoUrl || "";
+  
+  var linhas = dadosOS.linhas || [{}];
+  var totalGravado = 0;
+  
+  for (var i = 0; i < linhas.length; i++) {
+    var l = linhas[i];
+    var linhaNova = [
+      numOS,                                                 // 1: Número OS
+      dataHora,                                              // 2: Data / Hora
+      cliente,                                               // 3: Cliente / Empresa
+      doc,                                                   // 4: CNPJ / CPF
+      local,                                                 // 5: Local / Pista / Terminal
+      categoria,                                             // 6: Categoria
+      tituloServico,                                         // 7: Título do Serviço
+      l.equipamentoServico || tituloServico,                 // 8: Equipamentos / Operadores
+      parseFloat(l.valor || dadosOS.valorTotal || 0),        // 9: Valor Total (R$)
+      l.status || "CONCLUÍDA",                              // 10: Status Operacional
+      l.agente || responsavel,                               // 11: Nome Do Agente ou Serviço Executado
+      l.horaInicio || "00:00",                               // 12: Hora Início
+      l.horaFim || "00:00",                                  // 13: Hora Fim
+      l.quantidade || "1",                                   // 14: Quantidade
+      responsavel,                                           // 15: Responsável pelo Preenchimento
+      assinatura,                                            // 16: Assinatura do Cliente
+      linkFoto,                                              // 17: Foto do Canhoto
+      "-"                                                    // 18: Nº da Fatura
     ];
     
-    sheet.appendRow(novaLinha);
-    
+    sheet.appendRow(linhaNova);
     var lastRow = sheet.getLastRow();
+    
+    // Formatações
     sheet.getRange(lastRow, 9).setNumberFormat("R$ #,##0.00");
-    sheet.getRange(lastRow, 1, 1, novaLinha.length).setVerticalAlignment("middle");
+    sheet.getRange(lastRow, 1, 1, linhaNova.length).setVerticalAlignment("middle");
     
     var statusCell = sheet.getRange(lastRow, 10);
     statusCell.setFontWeight("bold").setHorizontalAlignment("center");
-    if (status.indexOf("CONCLUÍDA") >= 0) {
-      statusCell.setBackground("#FEF3C7").setFontColor("#92400E");
-    } else if (status.indexOf("ANDAMENTO") >= 0) {
-      statusCell.setBackground("#DCFCE7").setFontColor("#166534");
-    }
+    statusCell.setBackground("#FEF3C7").setFontColor("#92400E");
     
-    return {
-      sucesso: true,
-      mensagem: "Ordem " + numOS + " gravada com sucesso nas 18 colunas!",
-      osNumber: numOS
-    };
-  } catch (err) {
-    return {
-      sucesso: false,
-      mensagem: "Erro ao salvar na planilha: " + err.toString()
-    };
+    totalGravado++;
+  }
+  
+  return totalGravado;
+}
+
+/**
+ * Cria ou obtém a subpasta "Processados" dentro da pasta oficial de Fotos
+ */
+function obterOuCriarSubpastaProcessados(pastaPai) {
+  var subpastas = pastaPai.getFoldersByName(WFS_CONFIG.PROCESSED_SUBFOLDER_NAME);
+  if (subpastas.hasNext()) {
+    return subpastas.next();
+  } else {
+    return pastaPai.createFolder(WFS_CONFIG.PROCESSED_SUBFOLDER_NAME);
   }
 }
 
-// 5. SALVAMENTO DE FOTOS NO GOOGLE DRIVE E NA ABA 'Fotos_SO'
-function salvarFotoNaAbaFotosSO(dadosFoto) {
-  try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheetFotos = ss.getSheetByName(WFS_CONFIG.PHOTOS_SHEET_NAME) || configurarAbaFotosSO();
-    
-    var numOS = dadosFoto.osNumber || ("OS-" + Date.now());
-    var dataHora = dadosFoto.dataHora || Utilities.formatDate(new Date(), "America/Sao_Paulo", "dd/MM/yyyy HH:mm:ss");
-    var cliente = dadosFoto.cliente || "Cliente WFS";
-    var servico = dadosFoto.servico || "Atendimento de Pista / GSE";
-    var fileName = dadosFoto.fileName || ("Canhoto_" + numOS + ".jpg");
-    var responsavel = dadosFoto.responsavel || "Técnico de Campo WFS";
-    var status = dadosFoto.status || "DIGITALIZADO / PROCESSADO";
-    
-    var driveFileUrl = dadosFoto.driveFileUrl || "";
-    var driveFileId = "";
-    
-    // Tenta salvar imagem física na pasta do Drive configurada
-    if (dadosFoto.imageBase64) {
-      try {
-        var cleanBase64 = dadosFoto.imageBase64.replace(/^data:image\/[a-z]+;base64,/, "");
-        var decoded = Utilities.base64Decode(cleanBase64);
-        var blob = Utilities.newBlob(decoded, "image/jpeg", fileName);
-        
-        var folder;
-        try {
-          folder = DriveApp.getFolderById(WFS_CONFIG.DRIVE_FOLDER_ID);
-        } catch (fErr) {
-          folder = DriveApp.getRootFolder();
-        }
-        
-        var file = folder.createFile(blob);
-        file.setDescription("OS " + numOS + " | Cliente: " + cliente + " | Data: " + dataHora);
-        driveFileUrl = file.getUrl();
-        driveFileId = file.getId();
-      } catch (uploadErr) {
-        Logger.log("Erro no upload DriveApp: " + uploadErr.toString());
-        if (!driveFileUrl) {
-          driveFileUrl = WFS_CONFIG.DRIVE_FOLDER_URL;
-        }
-      }
-    }
-    
-    if (!driveFileUrl) {
-      driveFileUrl = WFS_CONFIG.DRIVE_FOLDER_URL;
-    }
-    
-    var linhaFoto = [
-      numOS,                          // 1: Nº OS
-      dataHora,                       // 2: Data / Hora
-      cliente,                        // 3: Cliente / Empresa
-      servico,                        // 4: Título do Serviço / Voo
-      driveFileUrl,                   // 5: Link Google Drive
-      driveFileId || "-",             // 6: ID Arquivo Drive
-      WFS_CONFIG.DRIVE_FOLDER_ID,     // 7: ID Pasta Drive
-      responsavel,                    // 8: Responsável / Atendente
-      status,                         // 9: Status
-      '=HYPERLINK("' + driveFileUrl + '", "🔗 Ver no Drive")' // 10: Link Direto
-    ];
-    
-    sheetFotos.appendRow(linhaFoto);
-    var lastRow = sheetFotos.getLastRow();
-    sheetFotos.getRange(lastRow, 1, 1, linhaFoto.length).setVerticalAlignment("middle");
-    
-    return {
-      sucesso: true,
-      mensagem: "Foto da OS " + numOS + " enviada para a pasta Fotos_SO (Drive ID: " + WFS_CONFIG.DRIVE_FOLDER_ID + ") e registrada na aba Fotos_SO!",
-      driveFileUrl: driveFileUrl,
-      driveFolderId: WFS_CONFIG.DRIVE_FOLDER_ID
-    };
-  } catch (err) {
-    return {
-      sucesso: false,
-      mensagem: "Erro ao registrar foto em Fotos_SO: " + err.toString()
-    };
-  }
-}
-
-// 6. CONFIGURAÇÃO DA ABA 'Fotos_SO'
-function configurarAbaFotosSO() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName(WFS_CONFIG.PHOTOS_SHEET_NAME);
-  
-  if (!sheet) {
-    sheet = ss.insertSheet(WFS_CONFIG.PHOTOS_SHEET_NAME);
-  }
-  
-  var totalCols = 10;
-  
-  // Banner Fotos_SO
-  sheet.getRange(1, 1, 1, totalCols).merge();
-  var banner = sheet.getRange(1, 1);
-  banner.setValue("📷 REPOSITÓRIO OFICIAL DE DIGITALIZAÇÕES & FOTOS DE CANHOTOS WFS | DRIVE ID: " + WFS_CONFIG.DRIVE_FOLDER_ID)
-        .setBackground("#0F172A")
-        .setFontColor("#FFFFFF")
-        .setFontWeight("bold")
-        .setFontSize(10)
-        .setHorizontalAlignment("center")
-        .setVerticalAlignment("middle");
-  sheet.setRowHeight(1, 30);
-  
-  // Linha de Cabeçalhos
-  var headers = [
-    "Número OS",
-    "Data / Hora Envio",
-    "Cliente / Empresa",
-    "Título do Serviço / Voo",
-    "Link Arquivo Google Drive",
-    "ID Arquivo Drive",
-    "ID Pasta Drive (Fotos_SO)",
-    "Responsável / Atendente",
-    "Status da Foto",
-    "Acesso Rápido"
-  ];
-  
-  var headerRange = sheet.getRange(2, 1, 1, headers.length);
-  headerRange.setValues([headers])
-             .setBackground("#991B1B")
-             .setFontColor("#FFFFFF")
-             .setFontWeight("bold")
-             .setFontSize(9)
-             .setHorizontalAlignment("center")
-             .setVerticalAlignment("middle");
-  sheet.setRowHeight(2, 34);
-  sheet.setFrozenRows(2);
-  
-  var widths = [130, 150, 180, 200, 260, 160, 220, 180, 140, 120];
-  for (var i = 0; i < widths.length; i++) {
-    sheet.setColumnWidth(i + 1, widths[i]);
-  }
-  
-  return sheet;
-}
-
-// 7. CONFIGURAÇÃO DA ESTRUTURA VISUAL E 18 COLUNAS (Lançamentos Campo)
+/**
+ * Configuração automática da estrutura das 18 Colunas Oficiais
+ */
 function configurarAbaLancamentos() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName(WFS_CONFIG.SHEET_NAME);
-  
   if (!sheet) {
     sheet = ss.insertSheet(WFS_CONFIG.SHEET_NAME, 0);
   }
   
   var totalCols = 18;
   
-  // LINHA 1: BANNER CORPORATIVO PRINCIPAL (Colunas A a R)
+  // Linha 1: Banner Corporativo
   sheet.getRange(1, 1, 1, totalCols).merge();
-  var banner = sheet.getRange(1, 1);
-  banner.setValue("⚡ SISTEMA WFS | PAINEL DE CONTROLE DE PISTA & OPERAÇÕES DE CAMPO")
-        .setBackground(WFS_CONFIG.BANNER_COLOR)
-        .setFontColor("#FFFFFF")
-        .setFontWeight("bold")
-        .setFontSize(11)
-        .setHorizontalAlignment("center")
-        .setVerticalAlignment("middle");
+  sheet.getRange(1, 1).setValue("⚡ SISTEMA WFS | PAINEL DE CONTROLE DE PISTA & OPERAÇÕES DE CAMPO")
+       .setBackground("#0F172A")
+       .setFontColor("#FFFFFF")
+       .setFontWeight("bold")
+       .setFontSize(11)
+       .setHorizontalAlignment("center")
+       .setVerticalAlignment("middle");
   sheet.setRowHeight(1, 32);
 
-  // LINHA 2: BOTÕES DE AÇÃO
+  // Linha 2: Botões
   sheet.getRange(2, 1, 1, 4).merge();
   sheet.getRange(2, 1).setValue("⚡ 📱 WFS - PORTAL CAMPO & PISTA (CLIQUE AQUI)")
        .setBackground("#E31B23").setFontColor("#FFFFFF").setFontWeight("bold").setFontSize(10).setHorizontalAlignment("center").setVerticalAlignment("middle");
@@ -1545,52 +1466,36 @@ function configurarAbaLancamentos() {
        .setBackground("#1E293B").setFontColor("#E2E8F0").setFontWeight("bold").setFontSize(10).setHorizontalAlignment("center").setVerticalAlignment("middle");
 
   sheet.getRange(2, 12, 1, 7).merge();
-  sheet.getRange(2, 12).setValue("🔒 APENAS PROPRIETÁRIO")
+  sheet.getRange(2, 12).setValue("🤖 ROBÔ IA VISION ATIVO")
        .setBackground("#059669").setFontColor("#FFFFFF").setFontWeight("bold").setFontSize(10).setHorizontalAlignment("center").setVerticalAlignment("middle");
 
   sheet.setRowHeight(2, 44);
 
-  // LINHA 3: INSTRUÇÕES
+  // Linha 3: Instrução
   sheet.getRange(3, 1, 1, totalCols).merge();
-  sheet.getRange(3, 1).setValue("💡 Clique na célula vermelha acima ou no menu '⚡ WFS - Portal Campo' para preencher ordens, tirar fotos e colher assinaturas dentro da planilha.")
+  sheet.getRange(3, 1).setValue("💡 Robô IA Vision monitorando a pasta '1vDmx3GHFH_4FWfcNkPaOX7m3aH_yuFjD' e movendo para 'Processados'.")
        .setBackground("#F8FAFC").setFontColor("#475569").setFontSize(9).setFontWeight("bold").setHorizontalAlignment("center").setVerticalAlignment("middle");
   sheet.setRowHeight(3, 24);
 
-  // LINHA 4: CABEÇALHOS DAS 18 COLUNAS
+  // Linha 4: 18 Cabeçalhos
   var headers = [
-    "Número OS",                           // 1 (A)
-    "Data / Hora",                          // 2 (B)
-    "Cliente / Empresa",                    // 3 (C)
-    "CNPJ / CPF",                           // 4 (D)
-    "Local / Pista / Terminal",             // 5 (E)
-    "Categoria",                            // 6 (F)
-    "Título do Serviço",                    // 7 (G)
-    "Equipamentos / Operadores",            // 8 (H)
-    "Valor Total (R$)",                     // 9 (I)
-    "Status Operacional",                   // 10 (J)
-    "Nome Do Agente ou Serviço Executado",  // 11 (K)
-    "Hora Início",                          // 12 (L)
-    "Hora Fim",                             // 13 (M)
-    "Quantidade",                           // 14 (N)
-    "Responsável pelo Preenchimento",       // 15 (O)
-    "Assinatura do Cliente",                // 16 (P)
-    "Foto do Canhoto",                      // 17 (Q)
-    "Nº da Fatura"                          // 18 (R)
+    "Número OS", "Data / Hora", "Cliente / Empresa", "CNPJ / CPF", "Local / Pista / Terminal",
+    "Categoria", "Título do Serviço", "Equipamentos / Operadores", "Valor Total (R$)", "Status Operacional",
+    "Nome Do Agente ou Serviço Executado", "Hora Início", "Hora Fim", "Quantidade", "Responsável pelo Preenchimento",
+    "Assinatura do Cliente", "Foto do Canhoto", "Nº da Fatura"
   ];
   
-  var headerRange = sheet.getRange(4, 1, 1, headers.length);
-  headerRange.setValues([headers])
-             .setBackground(WFS_CONFIG.PRIMARY_COLOR)
-             .setFontColor("#FFFFFF")
-             .setFontWeight("bold")
-             .setFontSize(9)
-             .setHorizontalAlignment("center")
-             .setVerticalAlignment("middle");
-  
+  sheet.getRange(4, 1, 1, headers.length).setValues([headers])
+       .setBackground(WFS_CONFIG.PRIMARY_COLOR)
+       .setFontColor("#FFFFFF")
+       .setFontWeight("bold")
+       .setFontSize(9)
+       .setHorizontalAlignment("center")
+       .setVerticalAlignment("middle");
+       
   sheet.setRowHeight(4, 38);
   sheet.setFrozenRows(4);
-  
-  // Larguras ajustadas
+
   var widths = [110, 135, 180, 140, 160, 170, 200, 200, 120, 150, 240, 95, 95, 90, 180, 160, 150, 110];
   for (var i = 0; i < widths.length; i++) {
     sheet.setColumnWidth(i + 1, widths[i]);
@@ -1598,117 +1503,240 @@ function configurarAbaLancamentos() {
   
   return sheet;
 }
+`;
+};
 
-// 8. PROTEÇÃO
-function bloquearPlanilhaExclusivoProprietario() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheets = ss.getSheets();
-  var ownerEmail = WFS_CONFIG.OWNER_EMAIL;
-  
-  for (var i = 0; i < sheets.length; i++) {
-    var sheet = sheets[i];
-    var protection = sheet.protect().setDescription("Protegido: Apenas Proprietário (" + ownerEmail + ") tem privilégios totais");
-    var editors = protection.getEditors();
-    for (var j = 0; j < editors.length; j++) {
-      if (editors[j].getEmail().toLowerCase() !== ownerEmail.toLowerCase()) {
-        protection.removeEditor(editors[j]);
+// 3. CÓDIGO 2: WEBHOOK.GS: WFS / ORBITAL - REQUISIÇÕES WEB DO SISTEMA (doPost e doGet)
+export const generateWebhookScriptCode = (
+  companyName: string = 'Orbital Serviços Auxiliares de Transporte Aéreo LTDA',
+  ownerEmail: string = 'ivoaltctrl@gmail.com'
+) => {
+  return `/**
+ * ============================================================================
+ * CÓDIGO 2: WEBHOOK.GS: WFS / ORBITAL - REQUISIÇÕES WEB DO SISTEMA (doPost e doGet)
+ * ============================================================================
+ * - Ligação completa entre Front-end e Back-end
+ * - Leitura direta da planilha (get_lancamentos) para espelhar dados reais
+ * - Manipulação de requisições POST e GET
+ * - Upload de fotos diretas e gravação de linhas
+ * - Atualização de Status da OS / Fatura (update_order_status)
+ * - Gestão de Status (ABERTO / FECHADO) e Usuários com SHA-256
+ * ============================================================================
+ * EMPRESA: ${companyName}
+ * PROPRIETÁRIO: ${ownerEmail}
+ * ============================================================================
+ */
+
+var WFS_CONFIG = {
+  COMPANY_NAME: "${companyName}",
+  PRIMARY_COLOR: "#991B1B",
+  DARK_COLOR: "#0F172A",
+  OWNER_EMAIL: "${ownerEmail}",
+  DRIVE_FOLDER_ID: "1vDmx3GHFH_4FWfcNkPaOX7m3aH_yuFjD",
+  PROCESSED_SUBFOLDER_NAME: "Processados",
+  SHEET_NAME: "Lançamentos Campo",
+  STATUS_SHEET_NAME: "Status",
+  USERS_SHEET_NAME: "Usuários"
+};
+
+/**
+ * 1. REQUISIÇÕES GET (doGet)
+ */
+function doGet(e) {
+  var action = (e && e.parameter && e.parameter.action) ? e.parameter.action : "";
+
+  // 1.1 Espelhamento dos Lançamentos da Planilha para o Front-end
+  if (action === "get_lancamentos" || action === "get_orders" || action === "get_data") {
+    return jsonResponse(obterLancamentosPlanilha());
+  }
+
+  // 1.2 Obter Status do Sistema (ABERTO / FECHADO)
+  if (action === "get_status" || action === "get_system_status") {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheet = ss.getSheetByName(WFS_CONFIG.STATUS_SHEET_NAME) || configurarAbaStatus();
+    var statusVal = String(sheet.getRange("A2").getValue() || "ABERTO").toUpperCase();
+    var dataHora = sheet.getRange("B2").getValue();
+    var responsavel = sheet.getRange("C2").getValue();
+
+    return jsonResponse({
+      success: true,
+      status: statusVal,
+      isClosed: statusVal === "FECHADO",
+      isMaintenanceMode: statusVal === "FECHADO",
+      updatedAt: dataHora,
+      updatedBy: responsavel
+    });
+  }
+
+  // 1.3 Obter Usuários com Acesso (Apenas perfis e nomes, sem expor hash de senha)
+  if (action === "get_users") {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheet = ss.getSheetByName(WFS_CONFIG.USERS_SHEET_NAME) || configurarAbaUsuarios();
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) return jsonResponse({ success: true, users: [] });
+
+    var values = sheet.getRange(2, 1, lastRow - 1, 4).getValues();
+    var users = [];
+
+    for (var i = 0; i < values.length; i++) {
+      if (values[i][0]) {
+        users.push({
+          nome: String(values[i][0]),
+          email: String(values[i][1]),
+          perfil: String(values[i][2]),
+          ativo: true
+        });
       }
     }
-    if (protection.canDomainEdit()) protection.setDomainEdit(false);
+    return jsonResponse({ success: true, users: users });
   }
-  SpreadsheetApp.getUi().alert("🔒 PLANILHA BLOQUEADA: Apenas " + ownerEmail + " pode editar fórmulas e estrutura.");
+
+  // 1.4 Disparo manual do robô via Front-end (se função estiver disponível no projeto)
+  if (action === "exec_robot") {
+    if (typeof executarRoboLeituraPasta === "function") {
+      return jsonResponse(executarRoboLeituraPasta());
+    } else {
+      return jsonResponse({
+        sucesso: false,
+        mensagem: "Função executarRoboLeituraPasta não encontrada. Certifique-se de que o arquivo ROBO_IA.gs está no mesmo projeto Apps Script."
+      });
+    }
+  }
+
+  return HtmlService.createHtmlOutput(
+    '<div style="font-family:sans-serif;padding:30px;text-align:center;">' +
+      '<h2 style="color:#991B1B;">⚡ WFS / Orbital - Webhook Online</h2>' +
+      '<p>Endpoint ativo para sincronização de Lançamentos Campo, Status e Usuários.</p>' +
+      '<p>Ações suportadas: <code>?action=get_lancamentos</code>, <code>?action=get_status</code>, <code>?action=get_users</code>, <code>?action=exec_robot</code></p>' +
+    '</div>'
+  ).setTitle("WFS Webhook API");
 }
 
-function desbloquearPlanilha() {
+/**
+ * 2. LEITURA DOS DADOS DAS 18 COLUNAS DA ABA \\"Lançamentos Campo\\"
+ */
+function obterLancamentosPlanilha() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var protections = ss.getProtections(SpreadsheetApp.ProtectionType.SHEET);
-  for (var i = 0; i < protections.length; i++) {
-    if (protections[i].canEdit()) protections[i].remove();
+  var sheet = ss.getSheetByName(WFS_CONFIG.SHEET_NAME);
+  
+  if (!sheet) {
+    return { success: false, total: 0, dados: [], mensagem: "Aba não encontrada." };
   }
-  SpreadsheetApp.getUi().alert("🔓 Planilha desbloqueada para edição.");
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 5) {
+    return { success: true, total: 0, dados: [], mensagem: "Nenhum lançamento gravado ainda." };
+  }
+
+  var range = sheet.getRange(5, 1, lastRow - 4, 18);
+  var values = range.getValues();
+  var dados = [];
+
+  for (var i = 0; i < values.length; i++) {
+    var r = values[i];
+    if (r[0] || r[2]) { // Tem Número OS ou Cliente
+      var dataHoraVal = r[1];
+      var dataHoraFormatada = "";
+      if (dataHoraVal instanceof Date) {
+        dataHoraFormatada = Utilities.formatDate(dataHoraVal, "America/Sao_Paulo", "dd/MM/yyyy HH:mm");
+      } else {
+        dataHoraFormatada = String(dataHoraVal || "");
+      }
+
+      dados.push({
+        linhaPlanilha: i + 5,
+        osNumber: String(r[0] || ""),
+        dataHora: dataHoraFormatada,
+        cliente: String(r[2] || ""),
+        cnpj: String(r[3] || ""),
+        local: String(r[4] || ""),
+        categoria: String(r[5] || ""),
+        tituloServico: String(r[6] || ""),
+        equipamentos: String(r[7] || ""),
+        valorTotal: Number(r[8]) || 0,
+        status: String(r[9] || ""),
+        agente: String(r[10] || ""),
+        horaInicio: String(r[11] || ""),
+        horaFim: String(r[12] || ""),
+        quantidade: String(r[13] || ""),
+        responsavel: String(r[14] || ""),
+        assinatura: String(r[15] || ""),
+        fotoCanhotoUrl: String(r[16] || ""),
+        numeroFatura: String(r[17] || "")
+      });
+    }
+  }
+
+  return {
+    success: true,
+    total: dados.length,
+    dados: dados
+  };
 }
 
-// 9. WEBHOOK POST & GET PARA SINCRONIZAÇÃO EM TEMPO REAL
+/**
+ * 3. REQUISIÇÕES POST (doPost)
+ */
 function doPost(e) {
   try {
-    var payload = JSON.parse(e.postData.contents);
-    
-    // Rota: Atualização de Status Geral do Sistema (ABERTO / FECHADO)
-    if (payload.action === "update_system_status" || payload.action === "set_status") {
-      var resStatus = atualizarStatusPlanilha(payload.status, payload.updatedBy);
-      return ContentService.createTextOutput(JSON.stringify({
-        success: true,
-        status: resStatus.status,
-        timestamp: resStatus.timestamp,
-        user: resStatus.user,
-        message: "Status do sistema gravado na aba 'Status' com sucesso!"
-      })).setMimeType(ContentService.MimeType.JSON);
+    var payload = {};
+    if (e && e.postData && e.postData.contents) {
+      payload = JSON.parse(e.postData.contents);
     }
 
-    // Rota: Upload de Canhoto para Drive e Aba Fotos_SO
-    if (payload.action === "upload_drive_canhoto" || payload.action === "upload_photo") {
-      var resFoto = salvarFotoNaAbaFotosSO({
-        osNumber: payload.osNumber,
-        cliente: payload.clientName,
-        servico: payload.serviceTitle,
-        fileName: payload.fileName,
-        imageBase64: payload.imageBase64,
-        driveFileUrl: payload.driveFileUrl,
-        responsavel: payload.filledBy || "Atendente de Pista"
+    var action = payload.action || "";
+
+    // 3.1 Atualizar Status do Sistema (ABERTO / FECHADO)
+    if (action === "update_system_status" || action === "set_status" || payload.status) {
+      var statusNovo = (payload.status || "ABERTO").toUpperCase();
+      var resp = payload.updatedBy || WFS_CONFIG.OWNER_EMAIL;
+      return jsonResponse(atualizarStatusPlanilha(statusNovo, resp));
+    }
+
+    // 3.2 Salvar Foto no Drive (Apenas upload físico do arquivo na pasta de entrada do Robô)
+    if (action === "upload_drive_canhoto" || action === "upload_photo" || action === "save_scan") {
+      var resFoto = salvarFotoNoDriveEProcessarLinhas(payload);
+      return jsonResponse(resFoto);
+    }
+
+    // 3.3 Gravação de Ordem Direta (DESATIVADO: O ROBO_IA.gs é o único responsável pela escrita das 18 colunas)
+    if (action === "append_order" || action === "create_order" || action === "sync_order") {
+      var msgAviso = "Gravação direta via front desativada. O ROBO_IA.gs é o único responsável por varrer a pasta Fotos_OS e gravar linhas.";
+      return jsonResponse({
+        success: false,
+        aviso: msgAviso,
+        message: msgAviso,
+        erro: msgAviso,
+        error: msgAviso
       });
-      return ContentService.createTextOutput(JSON.stringify(resFoto)).setMimeType(ContentService.MimeType.JSON);
-    }
-    
-    // Rota: Inserir Ordem Única (append)
-    if (payload.action === "append_order" || payload.action === "create_order" || payload.action === "sync_order") {
-      if (payload.order && typeof payload.order === "object") {
-        var resAppend = salvarLancamentoNaPlanilha(payload.order);
-        return ContentService.createTextOutput(JSON.stringify(resAppend)).setMimeType(ContentService.MimeType.JSON);
-      }
     }
 
-    // Rota: Atualização de Status da OS & Nº da Fatura pelo Faturamento
-    if (payload.action === "update_order_status") {
-      var resOrderUp = atualizarStatusDaOrdemNaPlanilha(payload);
-      return ContentService.createTextOutput(JSON.stringify(resOrderUp)).setMimeType(ContentService.MimeType.JSON);
+    // 3.4 Atualização de Status de OS e Nº da Fatura (Faturamento)
+    if (action === "update_order_status") {
+      var resUpdate = atualizarStatusDaOrdemNaPlanilha(payload);
+      return jsonResponse(resUpdate);
     }
 
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheet = ss.getSheetByName(WFS_CONFIG.SHEET_NAME) || configurarAbaLancamentos();
-    var data = payload.data || (Array.isArray(payload.orders) ? payload.orders : []);
-    
-    if (data.length === 0) {
-      return ContentService.createTextOutput(JSON.stringify({ status: "empty" })).setMimeType(ContentService.MimeType.JSON);
+    // 3.5 Alteração de Senha do Próprio Usuário
+    if (action === "user_change_password") {
+      return jsonResponse(alterarSenhaUsuarioPlanilha(payload.email, payload.currentPassword, payload.newPassword));
     }
-    
-    configurarAbaLancamentos();
-    var headers = [
-      "Número OS", "Data / Hora", "Cliente / Empresa", "CNPJ / CPF", "Local / Pista / Terminal",
-      "Categoria", "Título do Serviço", "Equipamentos / Operadores", "Valor Total (R$)", "Status Operacional",
-      "Nome Do Agente ou Serviço Executado", "Hora Início", "Hora Fim", "Quantidade", "Responsável pelo Preenchimento",
-      "Assinatura do Cliente", "Foto do Canhoto", "Nº da Fatura"
-    ];
-    
-    var rows = data.map(function(item) {
-      if (Array.isArray(item)) return item;
-      return headers.map(function(h) { return item[h] || ""; });
-    });
-    
-    if (rows.length > 0) {
-      sheet.getRange(5, 1, rows.length, headers.length).setValues(rows);
+
+    // 3.6 Reset de Senha pelo Administrador
+    if (action === "admin_reset_user_password") {
+      return jsonResponse(resetarSenhaUsuarioPlanilha(payload.adminEmail, payload.targetEmail, payload.newPassword));
     }
-    
-    return ContentService.createTextOutput(JSON.stringify({
-      status: "success",
-      received: data.length,
-      syncedAt: new Date().toISOString()
-    })).setMimeType(ContentService.MimeType.JSON);
+
+    return jsonResponse({ success: false, erro: "Ação não reconhecida: " + action });
+
   } catch (err) {
-    return ContentService.createTextOutput(JSON.stringify({ status: "error", message: err.toString() })).setMimeType(ContentService.MimeType.JSON);
+    return jsonResponse({ success: false, erro: err.toString() });
   }
 }
 
-// 9.1 ATUALIZADOR DIRETO DE STATUS OPERACIONAL E FATURA NA PLANILHA
+/**
+ * 4. ATUALIZADOR DIRETO DE STATUS OPERACIONAL E FATURA NA PLANILHA
+ */
 function atualizarStatusDaOrdemNaPlanilha(data) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName(WFS_CONFIG.SHEET_NAME) || ss.getSheets()[0];
@@ -1754,57 +1782,294 @@ function atualizarStatusDaOrdemNaPlanilha(data) {
   };
 }
 
-function doGet(e) {
-  if (e && e.parameter && (e.parameter.action === "get_status" || e.parameter.action === "get_system_status")) {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheet = ss.getSheetByName("Status") || configurarAbaStatus();
-    var val = sheet.getRange("A2").getValue();
-    var user = sheet.getRange("C2").getValue();
-    var time = sheet.getRange("B2").getValue();
-    var statusStr = (val ? String(val) : "ABERTO").toUpperCase();
-    return ContentService.createTextOutput(JSON.stringify({
-      status: statusStr,
-      isClosed: statusStr === "FECHADO",
-      updatedBy: user,
-      updatedAt: time
-    })).setMimeType(ContentService.MimeType.JSON);
-  }
-
-  if (e && e.parameter && e.parameter.action === "get_orders") {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheet = ss.getSheetByName(WFS_CONFIG.SHEET_NAME);
-    if (!sheet) {
-      return ContentService.createTextOutput(JSON.stringify({ orders: [] })).setMimeType(ContentService.MimeType.JSON);
+/**
+ * 5. SALVAR FOTO NO DRIVE E GRAVAR LINHAS
+ */
+/**
+ * 5. SALVAR FOTO CRUA NO GOOGLE DRIVE (PASTA DE ENTRADA DO ROBÔ)
+ * IMPORTANTE: O front NÃO grava linhas na planilha.
+ * Quem lê o arquivo e grava as 18 colunas é única e exclusivamente o ROBO_IA.gs.
+ */
+function salvarFotoNoDriveEProcessarLinhas(payload) {
+  try {
+    if (!payload.imageBase64) {
+      return { success: false, erro: "Imagem não recebida no payload (imageBase64 ausente)." };
     }
-    var data = sheet.getDataRange().getValues();
-    return ContentService.createTextOutput(JSON.stringify({ rawData: data, total: data.length })).setMimeType(ContentService.MimeType.JSON);
+
+    var base64Data = payload.imageBase64;
+    var commaIndex = base64Data.indexOf(",");
+    if (commaIndex !== -1 && base64Data.substring(0, commaIndex).indexOf("base64") !== -1) {
+      base64Data = base64Data.substring(commaIndex + 1);
+    }
+    base64Data = base64Data.replace(/\\s/g, "");
+
+    var decoded = Utilities.base64Decode(base64Data);
+    var nome = payload.fileName || ("Canhoto_" + (payload.osNumber || Date.now()) + ".jpg");
+    var blob = Utilities.newBlob(decoded, "image/jpeg", nome);
+
+    var targetFolderId = payload.driveFolderId || WFS_CONFIG.DRIVE_FOLDER_ID;
+    var pasta = DriveApp.getFolderById(targetFolderId);
+    var arquivo = pasta.createFile(blob);
+    var driveUrl = arquivo.getUrl();
+    var fileId = arquivo.getId();
+
+    return {
+      success: true,
+      fileUrl: driveUrl,
+      driveFileUrl: driveUrl,
+      driveUrl: driveUrl,
+      fileId: fileId,
+      fileName: nome,
+      folderId: targetFolderId,
+      mensagem: "Foto salva com sucesso na pasta de entrada do Drive! O Robô IA Vision iniciará a leitura.",
+      message: "Foto salva com sucesso na pasta de entrada do Drive! O Robô IA Vision iniciará a leitura."
+    };
+  } catch (err) {
+    return {
+      success: false,
+      erro: "Erro ao salvar foto no Drive: " + err.toString(),
+      error: "Erro ao salvar foto no Drive: " + err.toString(),
+      message: "Erro ao salvar foto no Drive: " + err.toString()
+    };
   }
-  return HtmlService.createHtmlOutput(gerarHtmlPortalModoCampo()).setTitle("WFS - Modo Campo & Pista").setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
-// 10. GERADOR HTML DO ESPELHO DO MODO CAMPO & PISTA
-function gerarHtmlPortalModoCampo(isSidebar) {
-  var html = [];
-  html.push('<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">');
-  html.push('<style>body{margin:0;padding:0;font-family:system-ui,sans-serif;background:#f8fafc;color:#0f172a;}.header{background:#fff;border-bottom:2px solid #e2e8f0;padding:12px 16px;display:flex;align-items:center;justify-content:space-between;}.badge{background:#991B1B;color:#fff;font-weight:900;padding:4px 8px;border-radius:6px;font-size:12px;}.card{background:#fff;border:1px solid #cbd5e1;border-radius:12px;padding:14px;margin:12px;}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;}label{font-size:11px;font-weight:700;color:#475569;display:block;margin-bottom:3px;}input,select{width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:12px;box-sizing:border-box;}.btn{background:#991B1B;color:#fff;font-weight:800;padding:12px;border:none;border-radius:8px;width:100%;cursor:pointer;margin-top:10px;}</style></head><body>');
-  html.push('<div class="header"><div><span class="badge">WFS</span> <strong>Portal de Lançamento de Pista</strong></div></div>');
-  html.push('<div class="card"><div class="grid">');
-  html.push('<div><label>Nº OS</label><input type="text" id="osNumber" value="31877"></div>');
-  html.push('<div><label>Cliente</label><input type="text" id="cliente" value="ITA AIRWAYS"></div>');
-  html.push('<div><label>Local / Pista</label><input type="text" id="local" value="GRU"></div>');
-  html.push('<div><label>Título do Serviço</label><input type="text" id="servico" value="CANCELAMENTO DE VOO AZ675"></div>');
-  html.push('<div><label>Nome do Atendente / Matrícula</label><input type="text" id="agente" placeholder="AMANDA APARECIDA VASCO CORTEZ 14286"></div>');
-  html.push('<div><label>Hora Início</label><input type="time" id="horaInicio" value="14:34"></div>');
-  html.push('<div><label>Hora Fim</label><input type="time" id="horaFim" value="20:10"></div>');
-  html.push('<div><label>Responsável Preenchimento</label><input type="text" id="responsavel" value="Amanda Aparecida Vasco Cortez"></div>');
-  html.push('</div><button class="btn" onclick="salvar()">GRAVAR NA PLANILHA (18 COLUNAS) ➔</button><div id="fb" style="margin-top:10px;font-weight:bold;font-size:12px;display:none;"></div></div>');
-  html.push('<script>function salvar(){var d={osNumber:document.getElementById("osNumber").value,cliente:document.getElementById("cliente").value,local:document.getElementById("local").value,servico:document.getElementById("servico").value,agente:document.getElementById("agente").value,horaInicio:document.getElementById("horaInicio").value,horaFim:document.getElementById("horaFim").value,responsavel:document.getElementById("responsavel").value};var fb=document.getElementById("fb");fb.style.display="block";fb.innerHTML="Salvando...";google.script.run.withSuccessHandler(function(r){fb.innerHTML="✓ "+r.mensagem;}).salvarLancamentoNaPlanilha(d);}</script>');
-  html.push('</body></html>');
-  return html.join("");
+/**
+ * 6. GRAVAR LINHAS NA PLANILHA
+ */
+function gravarMultiplasLinhasOS(dadosOS, fotoUrl) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(WFS_CONFIG.SHEET_NAME) || configurarAbaLancamentos();
+  
+  var numOS = dadosOS.numeroOS || dadosOS.osNumber || ("318" + Math.floor(10 + Math.random() * 90));
+  var dataHora = dadosOS.data || Utilities.formatDate(new Date(), "America/Sao_Paulo", "dd/MM/yyyy HH:mm");
+  var cliente = dadosOS.cliente || dadosOS.clientName || "WFS AIRLINES";
+  var doc = dadosOS.cnpj || dadosOS.clientDocument || "";
+  var local = dadosOS.local || dadosOS.workLocation || "GRU";
+  var categoria = dadosOS.categoria || dadosOS.category || "Serviços Auxiliares de Transporte Aéreo";
+  var tituloServico = dadosOS.servicoTitulo || dadosOS.title || "Atendimento de Pista / Carga";
+  var responsavel = dadosOS.responsavel || dadosOS.filledBy || "Equipe de Campo WFS";
+  var assinatura = dadosOS.assinatura || "Assinado no Campo";
+  var linkFoto = fotoUrl || dadosOS.fotoUrl || "";
+  
+  var linhas = dadosOS.linhas || dadosOS.items || [{}];
+  var totalGravado = 0;
+  
+  for (var i = 0; i < linhas.length; i++) {
+    var l = linhas[i];
+    var linhaNova = [
+      numOS,
+      dataHora,
+      cliente,
+      doc,
+      local,
+      categoria,
+      tituloServico,
+      l.equipamentoServico || l.name || tituloServico,
+      parseFloat(l.valor || l.totalPrice || dadosOS.valorTotal || dadosOS.totalAmount || 0),
+      l.status || "CONCLUÍDA",
+      l.agente || dadosOS.agentName || responsavel,
+      l.horaInicio || dadosOS.startTime || "00:00",
+      l.horaFim || dadosOS.endTime || "00:00",
+      l.quantidade || l.quantity || "1",
+      responsavel,
+      assinatura,
+      linkFoto,
+      dadosOS.invoiceNumber || "-"
+    ];
+    
+    sheet.appendRow(linhaNova);
+    var lastRow = sheet.getLastRow();
+    sheet.getRange(lastRow, 9).setNumberFormat("R$ #,##0.00");
+    sheet.getRange(lastRow, 1, 1, linhaNova.length).setVerticalAlignment("middle");
+    
+    var statusCell = sheet.getRange(lastRow, 10);
+    statusCell.setFontWeight("bold").setHorizontalAlignment("center");
+    statusCell.setBackground("#FEF3C7").setFontColor("#92400E");
+    
+    totalGravado++;
+  }
+  
+  return totalGravado;
 }
 
-function gerarHtmlDigitalizadorFoto() {
-  return '<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:20px;"><h2>📷 Digitalizar Canhoto / OS para Fotos_SO</h2><p>Destino: Pasta Google Drive <code>' + WFS_CONFIG.DRIVE_FOLDER_ID + '</code> & Aba <code>Fotos_SO</code></p><input type="file" accept="image/*" capture="environment"><p>A foto será salva e o link indexado automaticamente.</p></body></html>';
+/**
+ * 7. GERENCIAMENTO DE STATUS (ABERTO / FECHADO)
+ */
+function atualizarStatusPlanilha(novoStatus, responsavel) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(WFS_CONFIG.STATUS_SHEET_NAME) || configurarAbaStatus();
+  var statusUpper = (novoStatus || "ABERTO").toUpperCase();
+  var timestamp = Utilities.formatDate(new Date(), "America/Sao_Paulo", "dd/MM/yyyy HH:mm:ss");
+  var user = responsavel || WFS_CONFIG.OWNER_EMAIL;
+
+  sheet.getRange("A2").setValue(statusUpper);
+  sheet.getRange("B2").setValue(timestamp);
+  sheet.getRange("C2").setValue(user);
+  sheet.getRange("D2").setValue(statusUpper === "FECHADO" ? "Sistema temporariamente fechado pela Gestão." : "Sistema operacional e aberto.");
+
+  var cell = sheet.getRange("A2");
+  if (statusUpper === "FECHADO") {
+    cell.setBackground("#FEE2E2").setFontColor("#991B1B").setFontWeight("bold");
+  } else {
+    cell.setBackground("#DCFCE7").setFontColor("#166534").setFontWeight("bold");
+  }
+
+  return { success: true, status: statusUpper, timestamp: timestamp, user: user };
+}
+
+function configurarAbaStatus() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(WFS_CONFIG.STATUS_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(WFS_CONFIG.STATUS_SHEET_NAME);
+  }
+  sheet.getRange("A1:D1").setValues([["STATUS_SISTEMA", "DATA_HORA_ATUALIZACAO", "ATUALIZADO_POR", "MENSAGEM_AVISO"]])
+       .setBackground(WFS_CONFIG.DARK_COLOR).setFontColor("#FFFFFF").setFontWeight("bold").setHorizontalAlignment("center");
+  if (!sheet.getRange("A2").getValue()) {
+    sheet.getRange("A2").setValue("ABERTO");
+    sheet.getRange("B2").setValue(Utilities.formatDate(new Date(), "America/Sao_Paulo", "dd/MM/yyyy HH:mm:ss"));
+    sheet.getRange("C2").setValue(WFS_CONFIG.OWNER_EMAIL);
+    sheet.getRange("D2").setValue("Sistema operacional e aberto.");
+  }
+  return sheet;
+}
+
+/**
+ * 8. GESTÃO DE USUÁRIOS COM SENHAS CRIPTOGRAFADAS (SHA-256)
+ */
+function configurarAbaUsuarios() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(WFS_CONFIG.USERS_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(WFS_CONFIG.USERS_SHEET_NAME);
+  }
+  sheet.getRange("A1:D1").setValues([["NOME", "EMAIL", "PERFIL", "SENHA_HASH_SHA256"]])
+       .setBackground(WFS_CONFIG.DARK_COLOR).setFontColor("#FFFFFF").setFontWeight("bold").setHorizontalAlignment("center");
+  return sheet;
+}
+
+function gerarHashSenha(senhaTexto) {
+  var rawHash = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, senhaTexto, Utilities.Charset.UTF_8);
+  var txtHash = "";
+  for (var i = 0; i < rawHash.length; i++) {
+    var byteVal = rawHash[i];
+    if (byteVal < 0) byteVal += 256;
+    var byteHex = byteVal.toString(16);
+    if (byteHex.length === 1) byteHex = "0" + byteHex;
+    txtHash += byteHex;
+  }
+  return txtHash;
+}
+
+function alterarSenhaUsuarioPlanilha(email, senhaAtual, novaSenha) {
+  if (!email || !senhaAtual || !novaSenha) {
+    return { success: false, erro: "Preencha todos os campos obrigatórios." };
+  }
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(WFS_CONFIG.USERS_SHEET_NAME) || configurarAbaUsuarios();
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return { success: false, erro: "Nenhum usuário cadastrado na planilha." };
+
+  var values = sheet.getRange(2, 1, lastRow - 1, 4).getValues();
+  var hashAtual = gerarHashSenha(senhaAtual);
+  var novoHash = gerarHashSenha(novaSenha);
+
+  for (var i = 0; i < values.length; i++) {
+    var userEmail = String(values[i][1] || "").toLowerCase().trim();
+    if (userEmail === email.toLowerCase().trim()) {
+      var savedHash = String(values[i][3] || "").trim();
+      if (savedHash && savedHash !== hashAtual) {
+        return { success: false, erro: "A senha atual fornecida está incorreta." };
+      }
+      sheet.getRange(i + 2, 4).setValue(novoHash);
+      return { success: true, mensagem: "Senha alterada com sucesso!" };
+    }
+  }
+  return { success: false, erro: "Usuário com o e-mail especificado não foi encontrado." };
+}
+
+function resetarSenhaUsuarioPlanilha(adminEmail, targetEmail, novaSenha) {
+  if (!adminEmail || !targetEmail || !novaSenha) {
+    return { success: false, erro: "Preencha todos os campos para o reset de senha." };
+  }
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(WFS_CONFIG.USERS_SHEET_NAME) || configurarAbaUsuarios();
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return { success: false, erro: "Nenhum usuário cadastrado na planilha." };
+
+  var values = sheet.getRange(2, 1, lastRow - 1, 4).getValues();
+  var novoHash = gerarHashSenha(novaSenha);
+
+  for (var i = 0; i < values.length; i++) {
+    var userEmail = String(values[i][1] || "").toLowerCase().trim();
+    if (userEmail === targetEmail.toLowerCase().trim()) {
+      sheet.getRange(i + 2, 4).setValue(novoHash);
+      return { success: true, mensagem: "Senha do usuário " + targetEmail + " redefinida com sucesso pelo administrador!" };
+    }
+  }
+  return { success: false, erro: "Usuário não encontrado para redefinição." };
+}
+
+/**
+ * 9. CONFIGURAÇÃO DA ESTRUTURA VISUAL E 18 COLUNAS (Lançamentos Campo)
+ */
+function configurarAbaLancamentos() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(WFS_CONFIG.SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(WFS_CONFIG.SHEET_NAME, 0);
+  }
+  
+  var totalCols = 18;
+  sheet.getRange(1, 1, 1, totalCols).merge();
+  sheet.getRange(1, 1).setValue("⚡ SISTEMA WFS | PAINEL DE CONTROLE DE PISTA & OPERAÇÕES DE CAMPO")
+       .setBackground(WFS_CONFIG.DARK_COLOR)
+       .setFontColor("#FFFFFF")
+       .setFontWeight("bold")
+       .setFontSize(11)
+       .setHorizontalAlignment("center")
+       .setVerticalAlignment("middle");
+  sheet.setRowHeight(1, 32);
+
+  var headers = [
+    "Número OS", "Data / Hora", "Cliente / Empresa", "CNPJ / CPF", "Local / Pista / Terminal",
+    "Categoria", "Título do Serviço", "Equipamentos / Operadores", "Valor Total (R$)", "Status Operacional",
+    "Nome Do Agente ou Serviço Executado", "Hora Início", "Hora Fim", "Quantidade", "Responsável pelo Preenchimento",
+    "Assinatura do Cliente", "Foto do Canhoto", "Nº da Fatura"
+  ];
+  
+  sheet.getRange(4, 1, 1, headers.length).setValues([headers])
+       .setBackground(WFS_CONFIG.PRIMARY_COLOR)
+       .setFontColor("#FFFFFF")
+       .setFontWeight("bold")
+       .setFontSize(9)
+       .setHorizontalAlignment("center")
+       .setVerticalAlignment("middle");
+       
+  sheet.setRowHeight(4, 38);
+  sheet.setFrozenRows(4);
+
+  var widths = [110, 135, 180, 140, 160, 170, 200, 200, 120, 150, 240, 95, 95, 90, 180, 160, 150, 110];
+  for (var i = 0; i < widths.length; i++) {
+    sheet.setColumnWidth(i + 1, widths[i]);
+  }
+  
+  return sheet;
+}
+
+function jsonResponse(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }
 `;
 };
+
+// 4. Default / Combined Script Generator
+export const generateGoogleAppsScriptCode = (
+  appUrl: string = typeof window !== 'undefined' ? window.location.origin : '',
+  companyName: string = 'Orbital Serviços Auxiliares de Transporte Aéreo LTDA',
+  ownerEmail: string = 'ivoaltctrl@gmail.com'
+) => {
+  return generateWebhookScriptCode(companyName, ownerEmail);
+};
+

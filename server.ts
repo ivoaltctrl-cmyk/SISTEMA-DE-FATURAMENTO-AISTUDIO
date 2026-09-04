@@ -1405,43 +1405,82 @@ app.post(['/api/digitize-os', '/api/digitize-os/'], async (req: Request, res: Re
 });
 
 // Direct upload endpoint for Canhotos & Photos to Google Drive folder Fotos_SO
-app.post('/api/drive/upload-canhoto', (req: Request, res: Response) => {
+app.post('/api/drive/upload-canhoto', async (req: Request, res: Response) => {
   try {
-    const { imageBase64, fileName, osNumber, clientName, serviceTitle } = req.body || {};
+    const { imageBase64, fileName, osNumber, clientName, serviceTitle, webhookUrl, driveFolderId } = req.body || {};
     const cleanOS = (osNumber || `CANHOTO-${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '');
     const timestamp = new Date().toISOString();
     const targetFileName = fileName || `Canhoto_${cleanOS}_${Date.now()}.jpg`;
-    const randomHash = Math.random().toString(36).substring(2, 12);
-    const driveFileUrl = `https://drive.google.com/file/d/1vDmx3GHFH_${cleanOS}_${randomHash}/view?usp=sharing`;
-    const driveFolderUrl = `https://drive.google.com/drive/folders/${DRIVE_FOLDER_ID}`;
+    const targetFolderId = driveFolderId || DRIVE_FOLDER_ID;
 
-    broadcastSystemEvent({
-      type: 'canhoto-uploaded',
-      fileName: targetFileName,
-      driveFileUrl,
-      driveFolderUrl,
-      driveFolderId: DRIVE_FOLDER_ID,
-      sheetName: PHOTOS_SHEET_NAME,
-      timestamp,
-      osNumber: cleanOS,
-      clientName: clientName || 'WFS Operacional',
-      serviceTitle: serviceTitle || 'Canhoto Enviado ao Drive',
-    });
+    if (!imageBase64) {
+      return res.status(400).json({ success: false, error: 'Imagem em base64 não fornecida (imageBase64 ausente).' });
+    }
 
-    console.log(`[GOOGLE DRIVE] Canhoto salvo com sucesso na pasta ${DRIVE_FOLDER_ID}: ${targetFileName}`);
+    const targetWebhook = (webhookUrl && typeof webhookUrl === 'string' && webhookUrl.startsWith('http'))
+      ? webhookUrl
+      : process.env.GOOGLE_WEBHOOK_URL;
 
-    return res.status(200).json({
-      success: true,
-      fileUrl: driveFileUrl,
-      folderUrl: driveFolderUrl,
-      folderId: DRIVE_FOLDER_ID,
-      sheetName: PHOTOS_SHEET_NAME,
-      fileName: targetFileName,
-      message: 'Foto enviada com sucesso para a pasta do Google Drive (Fotos_SO)',
+    if (targetWebhook) {
+      try {
+        const gasRes = await fetch(targetWebhook, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'upload_drive_canhoto',
+            driveFolderId: targetFolderId,
+            fileName: targetFileName,
+            imageBase64: imageBase64,
+            osNumber: cleanOS,
+            clientName: clientName || 'WFS Operacional',
+            serviceTitle: serviceTitle || 'Canhoto Enviado ao Drive',
+          }),
+        });
+
+        const gasData = (await gasRes.json().catch(() => null)) as any;
+        if (gasData && gasData.success) {
+          const fileUrl = gasData.fileUrl || gasData.driveUrl || `https://drive.google.com/drive/folders/${targetFolderId}`;
+          broadcastSystemEvent({
+            type: 'canhoto-uploaded',
+            fileName: targetFileName,
+            driveFileUrl: fileUrl,
+            driveFolderUrl: `https://drive.google.com/drive/folders/${targetFolderId}`,
+            driveFolderId: targetFolderId,
+            sheetName: PHOTOS_SHEET_NAME,
+            timestamp,
+            osNumber: cleanOS,
+          });
+
+          return res.status(200).json({
+            success: true,
+            fileUrl,
+            fileId: gasData.fileId,
+            folderUrl: `https://drive.google.com/drive/folders/${targetFolderId}`,
+            folderId: targetFolderId,
+            sheetName: PHOTOS_SHEET_NAME,
+            fileName: targetFileName,
+            message: gasData.mensagem || 'Foto salva com sucesso na pasta de entrada do Google Drive!',
+          });
+        } else {
+          const errMsg = gasData?.erro || gasData?.message || `Google Apps Script retornou erro (Status HTTP ${gasRes.status}).`;
+          return res.status(502).json({ success: false, error: errMsg });
+        }
+      } catch (proxyErr: any) {
+        console.error('Failed to proxy upload to Google Apps Script Webhook:', proxyErr);
+        return res.status(502).json({
+          success: false,
+          error: `Falha na conexão com o Webhook do Google Apps Script: ${proxyErr.message || proxyErr}`
+        });
+      }
+    }
+
+    return res.status(400).json({
+      success: false,
+      error: 'URL do Webhook do Google Apps Script não configurada nas preferências. A imagem não pôde ser enviada para a pasta do Google Drive.',
     });
   } catch (err: any) {
     console.error('Error in /api/drive/upload-canhoto:', err);
-    return res.status(500).json({ error: err.message || 'Erro ao processar envio ao Drive' });
+    return res.status(500).json({ success: false, error: err.message || 'Erro ao processar envio ao Drive' });
   }
 });
 

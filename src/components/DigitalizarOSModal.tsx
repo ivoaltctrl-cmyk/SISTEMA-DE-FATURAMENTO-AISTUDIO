@@ -110,7 +110,7 @@ export const DigitalizarOSModal: React.FC<DigitalizarOSModalProps> = ({
       const cfg = getSheetsConfig();
       const info: UploadedFileInfo = {
         fileName: driveResult.fileName,
-        fileUrl: driveResult.fileUrl,
+        fileUrl: driveResult.fileUrl || (driveResult as any).driveFileUrl || '',
         folderUrl: driveResult.folderUrl || cfg.driveFolderUrl || OFFICIAL_DRIVE_FOLDER_URL,
         folderId: driveResult.folderId || cfg.driveFolderId || OFFICIAL_DRIVE_FOLDER_ID,
         sheetName: driveResult.sheetName || OFFICIAL_PHOTOS_SHEET_NAME,

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
+  Bot,
   Camera,
   Check,
   CheckCircle2,
@@ -7,6 +8,7 @@ import {
   Cloud,
   Code,
   Copy,
+  Cpu,
   Download,
   ExternalLink,
   Eye,
@@ -16,9 +18,11 @@ import {
   HardHat,
   HelpCircle,
   KeyRound,
+  Layers,
   Link,
   Lock,
   Play,
+  Radio,
   RefreshCw,
   Save,
   ShieldAlert,
@@ -33,6 +37,9 @@ import { useApp } from '../context/AppContext';
 import {
   exportOrdersToCSV,
   generateGoogleAppsScriptCode,
+  generateRoboIaScriptCode,
+  generateWebhookScriptCode,
+  triggerRobotExecution,
   getSheetsConfig,
   OFFICIAL_SHEET_URL,
   OFFICIAL_DRIVE_FOLDER_URL,
@@ -56,6 +63,14 @@ export const SheetsSyncManager: React.FC = () => {
     null
   );
   const [copiedScript, setCopiedScript] = useState(false);
+  const [selectedScriptTab, setSelectedScriptTab] = useState<'robo' | 'webhook'>('robo');
+  const [copiedRobo, setCopiedRobo] = useState(false);
+  const [copiedWebhook, setCopiedWebhook] = useState(false);
+  const [isTriggeringRobot, setIsTriggeringRobot] = useState(false);
+  const [triggerRobotFeedback, setTriggerRobotFeedback] = useState<{
+    type: 'success' | 'error' | 'info';
+    message: string;
+  } | null>(null);
   const [copiedFieldUrl, setCopiedFieldUrl] = useState(false);
   const [showScriptModal, setShowScriptModal] = useState(false);
   const [showPreviewModal, setShowPreviewModal] = useState(false);
@@ -116,16 +131,58 @@ export const SheetsSyncManager: React.FC = () => {
     }
   };
 
-  const scriptCode = generateGoogleAppsScriptCode(
-    typeof window !== 'undefined' ? window.location.origin : '',
+  const roboIaCode = generateRoboIaScriptCode(
     company.tradeName || company.name,
     ownerEmailInput || 'ivoaltctrl@gmail.com'
   );
 
-  const handleCopyScript = () => {
-    navigator.clipboard.writeText(scriptCode);
-    setCopiedScript(true);
-    setTimeout(() => setCopiedScript(false), 3000);
+  const webhookScriptCode = generateWebhookScriptCode(
+    company.tradeName || company.name,
+    ownerEmailInput || 'ivoaltctrl@gmail.com'
+  );
+
+  const handleCopyRoboCode = () => {
+    navigator.clipboard.writeText(roboIaCode);
+    setCopiedRobo(true);
+    setTimeout(() => setCopiedRobo(false), 3000);
+  };
+
+  const handleCopyWebhookCode = () => {
+    navigator.clipboard.writeText(webhookScriptCode);
+    setCopiedWebhook(true);
+    setTimeout(() => setCopiedWebhook(false), 3000);
+  };
+
+  const handleTriggerRobotExecution = async () => {
+    setIsTriggeringRobot(true);
+    setTriggerRobotFeedback(null);
+
+    try {
+      const res = await triggerRobotExecution(webhookInput.trim() || undefined);
+      if (res.success) {
+        setTriggerRobotFeedback({
+          type: 'success',
+          message: res.message || 'Robô IA Vision acionado com sucesso!',
+        });
+        // Pull fresh orders after triggering
+        setTimeout(() => {
+          handleManualSync();
+        }, 2000);
+      } else {
+        setTriggerRobotFeedback({
+          type: 'error',
+          message: res.message,
+        });
+      }
+    } catch (err: any) {
+      setTriggerRobotFeedback({
+        type: 'error',
+        message: err.message || 'Falha ao acionar robô.',
+      });
+    } finally {
+      setIsTriggeringRobot(false);
+      setTimeout(() => setTriggerRobotFeedback(null), 8000);
+    }
   };
 
   const handleCopyFieldUrl = () => {
@@ -243,18 +300,21 @@ export const SheetsSyncManager: React.FC = () => {
         </div>
       </div>
 
-      {/* Script Installation & Code Block */}
+      {/* Script Installation & Code Block - SEPARATED SCRIPTS: ROBO_IA.gs & Webhook.gs */}
       <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-2xs space-y-6">
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">
-              <span className="px-2.5 py-0.5 bg-red-100 text-red-700 rounded-full font-black text-[10px] uppercase">
-                Google Apps Script
+              <span className="px-2.5 py-0.5 bg-red-100 text-red-700 rounded-full font-black text-[10px] uppercase tracking-wider">
+                Google Apps Script Modular
               </span>
-              <h3 className="text-lg font-black text-slate-900">Código do Portal WFS para o Google Sheets</h3>
+              <span className="px-2 py-0.5 bg-slate-100 text-slate-700 rounded-full font-bold text-[10px]">
+                2 Arquivos Separados
+              </span>
+              <h3 className="text-lg font-black text-slate-900">Scripts Oficiais WFS / Orbital</h3>
             </div>
-            <p className="text-xs text-slate-500 mt-0.5">
-              Instale em <strong>Extensões &gt; Apps Script</strong> da sua planilha Google para habilitar o Portal Campo integrado.
+            <p className="text-xs text-slate-500 mt-1">
+              Conforme sua separação, agora temos um script dedicado ao <strong>Robô IA Vision</strong> e outro para o <strong>Webhook &amp; Front-End</strong>.
             </p>
           </div>
 
@@ -265,80 +325,230 @@ export const SheetsSyncManager: React.FC = () => {
               className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors"
             >
               <Eye className="w-3.5 h-3.5 text-slate-600" />
-              <span>Ver Prévia do Portal</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={handleCopyScript}
-              className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs transition-all active:scale-95"
-            >
-              {copiedScript ? (
-                <>
-                  <Check className="w-4 h-4" />
-                  <span>Copiado!</span>
-                </>
-              ) : (
-                <>
-                  <Copy className="w-4 h-4" />
-                  <span>Copiar Script</span>
-                </>
-              )}
+              <span>Ver Portal Campo</span>
             </button>
           </div>
         </div>
 
-        {/* Step-by-Step Instructions */}
-        <div className="bg-slate-50 rounded-2xl p-4 border border-slate-200 text-xs space-y-3">
-          <h4 className="font-bold text-slate-800 flex items-center gap-2">
-            <Sparkles className="w-4 h-4 text-amber-500" /> Como Funciona os Botões Diretamente Dentro da Planilha:
-          </h4>
-          <ol className="list-decimal list-inside space-y-2 text-slate-600 font-medium leading-relaxed">
-            <li>
-              Abra a{' '}
-              <a
-                href={OFFICIAL_SHEET_URL}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-emerald-700 font-bold underline"
-              >
-                Planilha Oficial Google Sheets
-              </a>.
-            </li>
-            <li>No menu superior do Google Sheets, clique em <strong>Extensões &gt; Apps Script</strong>.</li>
-            <li>Apague o código existente e cole o script atualizado pelo botão acima.</li>
-            <li>Clique no ícone de <strong>Salvar (Disquete)</strong> e selecione a função <code>onOpen</code> para executar 1 vez.</li>
-            <li>
-              <strong>Pronto!</strong> Ao abrir a planilha:
-              <ul className="list-disc list-inside pl-4 mt-1 space-y-1">
-                <li>
-                  <strong>Clique no Botão Vermelho (Linha 2):</strong> Clicar na célula vermelha abre instantaneamente a janela modal de lançamento com foto e assinatura <strong>dentro da própria planilha</strong> (sem abrir link externo).
-                </li>
-                <li>
-                  <strong>Menu Superior:</strong> Você também pode clicar em <code>⚡ WFS - Portal Campo &gt; ⚡ Abrir WFS - Portal Campo & Pista</code>.
-                </li>
-                <li>
-                  <strong>Painel Lateral Automático:</strong> A barra lateral já abre pronta na direita da planilha para preenchimento ágil.
-                </li>
-              </ul>
-            </li>
-          </ol>
-        </div>
-
-        {/* Script Preview Box */}
-        <div className="relative">
-          <pre className="bg-slate-950 text-slate-200 p-4 rounded-2xl text-[11px] font-mono overflow-x-auto max-h-64 border border-slate-800 leading-relaxed">
-            {scriptCode}
-          </pre>
+        {/* Script Selection Tabs */}
+        <div className="flex flex-wrap gap-2 border-b border-slate-200 pb-3">
           <button
             type="button"
-            onClick={handleCopyScript}
-            className="absolute top-3 right-3 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 shadow-md"
+            onClick={() => setSelectedScriptTab('robo')}
+            className={`px-4 py-2.5 rounded-2xl text-xs font-black flex items-center gap-2 transition-all ${
+              selectedScriptTab === 'robo'
+                ? 'bg-red-600 text-white shadow-sm'
+                : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+            }`}
           >
-            {copiedScript ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-            <span>{copiedScript ? 'Copiado' : 'Copiar Tudo'}</span>
+            <Bot className="w-4 h-4" />
+            <span>1. Robô IA Vision (ROBO_IA.gs)</span>
+            <span className={`text-[10px] px-1.5 py-0.5 rounded-md ${
+              selectedScriptTab === 'robo' ? 'bg-red-700 text-white' : 'bg-slate-200 text-slate-600'
+            }`}>
+              Drive &amp; Gemini OCR
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setSelectedScriptTab('webhook')}
+            className={`px-4 py-2.5 rounded-2xl text-xs font-black flex items-center gap-2 transition-all ${
+              selectedScriptTab === 'webhook'
+                ? 'bg-slate-900 text-white shadow-sm'
+                : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+            }`}
+          >
+            <Radio className="w-4 h-4" />
+            <span>2. Webhook &amp; Integração (Webhook.gs)</span>
+            <span className={`text-[10px] px-1.5 py-0.5 rounded-md ${
+              selectedScriptTab === 'webhook' ? 'bg-slate-800 text-white' : 'bg-slate-200 text-slate-600'
+            }`}>
+              Front &lt;-&gt; Back API
+            </span>
           </button>
         </div>
+
+        {/* Tab 1: Robô IA Vision */}
+        {selectedScriptTab === 'robo' && (
+          <div className="space-y-4">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-red-50 border border-red-200 rounded-2xl p-4">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <Bot className="w-4 h-4 text-red-600" />
+                  <h4 className="font-bold text-red-950 text-sm">ROBO_IA.gs: Robô Autônomo com Gemini Vision</h4>
+                </div>
+                <p className="text-xs text-red-800 leading-relaxed">
+                  Varre a pasta <code>1vDmx3GHFH_4FWfcNkPaOX7m3aH_yuFjD</code>, extrai as 18 colunas via IA e move para &ldquo;Processados&rdquo;.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2 w-full sm:w-auto">
+                <button
+                  type="button"
+                  onClick={handleTriggerRobotExecution}
+                  disabled={isTriggeringRobot}
+                  className="px-3.5 py-2 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all disabled:opacity-50 shadow-2xs"
+                  title="Dispara a execução do robô via Webhook para testar a subida"
+                >
+                  <Play className={`w-3.5 h-3.5 text-red-600 ${isTriggeringRobot ? 'animate-spin' : ''}`} />
+                  <span>{isTriggeringRobot ? 'Acionando...' : 'Testar Robô Remoto'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleCopyRoboCode}
+                  className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs transition-all active:scale-95"
+                >
+                  {copiedRobo ? (
+                    <>
+                      <Check className="w-4 h-4" />
+                      <span>Copiado ROBO_IA.gs!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-4 h-4" />
+                      <span>Copiar ROBO_IA.gs</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {triggerRobotFeedback && (
+              <div
+                className={`p-3 rounded-xl text-xs font-bold flex items-center gap-2 ${
+                  triggerRobotFeedback.type === 'success'
+                    ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                    : 'bg-amber-50 text-amber-800 border border-amber-200'
+                }`}
+              >
+                <Sparkles className="w-4 h-4 shrink-0" />
+                <span>{triggerRobotFeedback.message}</span>
+              </div>
+            )}
+
+            {/* Instruction Checklist for Robô */}
+            <div className="bg-slate-50 rounded-2xl p-4 border border-slate-200 text-xs space-y-2.5">
+              <h5 className="font-bold text-slate-900 flex items-center gap-1.5">
+                <CheckCircle2 className="w-4 h-4 text-red-600" />
+                Como instalar e testar o <strong>ROBO_IA.gs</strong> na sua planilha:
+              </h5>
+              <ol className="list-decimal list-inside space-y-1.5 text-slate-600 font-medium leading-relaxed">
+                <li>Abra a planilha Google Sheets e acesse <strong>Extensões &gt; Apps Script</strong>.</li>
+                <li>Clique no botão <strong>+ (Adicionar arquivo de script)</strong> e nomeie como <code>ROBO_IA.gs</code>.</li>
+                <li>Cole o código copiado pelo botão vermelho acima e clique no <strong>Salvar (Disquete)</strong>.</li>
+                <li>
+                  <strong>Para testar a subida imediatamente:</strong> Na barra superior do Apps Script, selecione a função <code>executarRoboIaVisionAgora</code> e clique em <strong>Executar</strong>. Veja os logs em tempo real na janela de execução!
+                </li>
+                <li>
+                  <strong>Para rodar automaticamente no relógio:</strong> Clique no ícone de <strong>Acionadores (Relógio)</strong> na esquerda do Apps Script &gt; <em>Adicionar Acionador</em> &gt; Selecionar função: <code>verificarPastaEntradaDrive</code> &gt; Origem do evento: <em>Baseado em tempo</em> &gt; Temporizador por minutos (ex: a cada 5 ou 10 minutos).
+                </li>
+              </ol>
+            </div>
+
+            {/* Code preview block */}
+            <div className="relative">
+              <div className="flex items-center justify-between px-4 py-2 bg-slate-900 rounded-t-2xl border-t border-x border-slate-800 text-[11px] text-slate-400 font-mono">
+                <span>Arquivo: ROBO_IA.gs</span>
+                <span className="text-slate-500">Google Apps Script</span>
+              </div>
+              <pre className="bg-slate-950 text-slate-200 p-4 rounded-b-2xl text-[11px] font-mono overflow-x-auto max-h-72 border border-slate-800 leading-relaxed">
+                {roboIaCode}
+              </pre>
+              <button
+                type="button"
+                onClick={handleCopyRoboCode}
+                className="absolute top-11 right-3 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 shadow-md"
+              >
+                {copiedRobo ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                <span>{copiedRobo ? 'Copiado' : 'Copiar Tudo'}</span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Tab 2: Webhook & Integração */}
+        {selectedScriptTab === 'webhook' && (
+          <div className="space-y-4">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-slate-900 text-white rounded-2xl p-4">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <Radio className="w-4 h-4 text-emerald-400" />
+                  <h4 className="font-bold text-white text-sm">Webhook.gs: API Web &amp; Portal Campo</h4>
+                </div>
+                <p className="text-xs text-slate-300 leading-relaxed">
+                  Serve os endpoints <code>doPost</code> e <code>doGet</code> para leitura de lançamentos, alteração de status, login e disparo do robô.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2 w-full sm:w-auto">
+                <button
+                  type="button"
+                  onClick={handleCopyWebhookCode}
+                  className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs transition-all active:scale-95"
+                >
+                  {copiedWebhook ? (
+                    <>
+                      <Check className="w-4 h-4" />
+                      <span>Copiado Webhook.gs!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-4 h-4" />
+                      <span>Copiar Webhook.gs</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {/* Instruction Checklist for Webhook */}
+            <div className="bg-slate-50 rounded-2xl p-4 border border-slate-200 text-xs space-y-2.5">
+              <h5 className="font-bold text-slate-900 flex items-center gap-1.5">
+                <CheckCircle2 className="w-4 h-4 text-slate-800" />
+                Como instalar e implantar o <strong>Webhook.gs</strong>:
+              </h5>
+              <ol className="list-decimal list-inside space-y-1.5 text-slate-600 font-medium leading-relaxed">
+                <li>No Apps Script da planilha, crie ou selecione o arquivo <code>Webhook.gs</code>.</li>
+                <li>Cole o código copiado e clique no <strong>Salvar (Disquete)</strong>.</li>
+                <li>
+                  No topo direito, clique em <strong>Implantar &gt; Nova implantação</strong> (ou <em>Gerenciar implantações</em>).
+                </li>
+                <li>
+                  Selecione o tipo: <strong>Aplicativo da Web</strong> (Web App).
+                </li>
+                <li>
+                  Configure:
+                  <ul className="list-disc list-inside pl-4 mt-1 space-y-0.5 font-normal text-slate-700">
+                    <li>Executar como: <strong>Eu (seu e-mail)</strong></li>
+                    <li>Quem pode acessar: <strong>Qualquer pessoa</strong> (necessário para a API receber requisições do sistema)</li>
+                  </ul>
+                </li>
+                <li>Copie a <strong>URL do aplicativo da Web</strong> gerada e cole no campo &ldquo;URL do Webhook&rdquo; abaixo.</li>
+              </ol>
+            </div>
+
+            {/* Code preview block */}
+            <div className="relative">
+              <div className="flex items-center justify-between px-4 py-2 bg-slate-900 rounded-t-2xl border-t border-x border-slate-800 text-[11px] text-slate-400 font-mono">
+                <span>Arquivo: Webhook.gs</span>
+                <span className="text-slate-500">Google Apps Script</span>
+              </div>
+              <pre className="bg-slate-950 text-slate-200 p-4 rounded-b-2xl text-[11px] font-mono overflow-x-auto max-h-72 border border-slate-800 leading-relaxed">
+                {webhookScriptCode}
+              </pre>
+              <button
+                type="button"
+                onClick={handleCopyWebhookCode}
+                className="absolute top-11 right-3 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 shadow-md"
+              >
+                {copiedWebhook ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                <span>{copiedWebhook ? 'Copiado' : 'Copiar Tudo'}</span>
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Owner Protection & Security Settings */}
