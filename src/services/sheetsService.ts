@@ -1741,7 +1741,36 @@ function atualizarStatusDaOrdemNaPlanilha(data) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName(WFS_CONFIG.SHEET_NAME) || ss.getSheets()[0];
   var lastRow = sheet.getLastRow();
-  if (lastRow < 5) return { success: false, message: "Nenhum lançamento encontrado na planilha." };
+  if (lastRow < 5) {
+    var emptyMsg = "Nenhum lançamento encontrado na planilha.";
+    return { success: false, erro: emptyMsg, error: emptyMsg, message: emptyMsg };
+  }
+
+  var rawStatus = String(data.status || "").toLowerCase().trim();
+  var statusMap = {
+    "faturada": "FATURADA",
+    "paga": "PAGA",
+    "cancelada": "CANCELADA",
+    "concluida": "CONCLUÍDA",
+    "concluída": "CONCLUÍDA",
+    "em_andamento": "EM ANDAMENTO",
+    "aguardando_validacao": "AGUARDANDO VALIDAÇÃO",
+    "aguardando_validação": "AGUARDANDO VALIDAÇÃO",
+    "orcamento": "ORÇAMENTO",
+    "orçamento": "ORÇAMENTO",
+    "agendada": "AGENDADA"
+  };
+
+  var statusFormatado = statusMap[rawStatus];
+  if (!statusFormatado) {
+    var erroInvalido = "Status inválido recebido: '" + (data.status || "") + "'.";
+    return {
+      success: false,
+      erro: erroInvalido,
+      error: erroInvalido,
+      message: erroInvalido
+    };
+  }
 
   var targetNum = String(data.osNumber || "").replace(/[^0-9]/g, "");
   var values = sheet.getRange(5, 1, lastRow - 4, 18).getValues();
@@ -1754,12 +1783,6 @@ function atualizarStatusDaOrdemNaPlanilha(data) {
     if (rowNum === targetNum && targetNum !== "") {
       var r = i + 5;
       rowFound = r;
-      var statusFormatado = "CONCLUÍDA";
-      if (data.status === "faturada") statusFormatado = "FATURADA";
-      else if (data.status === "paga") statusFormatado = "PAGA";
-      else if (data.status === "cancelada") statusFormatado = "CANCELADA";
-      else if (data.status === "concluida") statusFormatado = "CONCLUÍDA";
-      else if (data.status === "em_andamento") statusFormatado = "EM ANDAMENTO";
 
       // Coluna 10 (J): Status Operacional
       sheet.getRange(r, 10).setValue(statusFormatado);
@@ -1773,12 +1796,24 @@ function atualizarStatusDaOrdemNaPlanilha(data) {
     }
   }
 
+  if (!found) {
+    var notFoundMsg = "OS " + (data.osNumber || "") + " não encontrada na planilha.";
+    return {
+      success: false,
+      erro: notFoundMsg,
+      error: notFoundMsg,
+      message: notFoundMsg
+    };
+  }
+
+  var successMsg = "OS " + data.osNumber + " atualizada para " + statusFormatado + " com sucesso na linha " + rowFound + " da Planilha Google!";
   return {
-    success: found,
+    success: true,
     row: rowFound,
     osNumber: data.osNumber,
-    status: data.status,
-    message: found ? "OS " + data.osNumber + " atualizada com sucesso na linha " + rowFound + " da Planilha Google!" : "OS não encontrada na planilha."
+    status: statusFormatado,
+    mensagem: successMsg,
+    message: successMsg
   };
 }
 
