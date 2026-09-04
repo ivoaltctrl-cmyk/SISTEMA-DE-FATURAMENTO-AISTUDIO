@@ -753,6 +753,7 @@ const MainApp: React.FC = () => {
             <ValidationManager
               onOpenDetail={(ord) => setSelectedOrderForDetail(ord)}
               onOpenTeamsModal={() => setShowTeamsModal(true)}
+              onNavigateToBilling={() => setActiveTab('faturamento')}
             />
           )}
 

@@ -10,6 +10,7 @@ import {
   Sparkles,
   User,
   Bot,
+  ArrowRight,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { ServiceOrder } from '../types';
@@ -18,10 +19,12 @@ import { formatCurrency, formatDate } from '../utils/formatters';
 interface ValidationManagerProps {
   onOpenDetail: (order: ServiceOrder) => void;
   onOpenTeamsModal?: () => void;
+  onNavigateToBilling?: () => void;
 }
 
 export const ValidationManager: React.FC<ValidationManagerProps> = ({
   onOpenDetail,
+  onNavigateToBilling,
 }) => {
   const {
     pendingValidationOrders,
@@ -49,7 +52,7 @@ export const ValidationManager: React.FC<ValidationManagerProps> = ({
   const handleApprove = (order: ServiceOrder) => {
     validateOrder(order.id, currentUser?.name || 'Faturamento WFS');
     setActionFeedback(`OS ${order.osNumber} validada e liberada para faturamento com sucesso!`);
-    setTimeout(() => setActionFeedback(null), 4000);
+    setTimeout(() => setActionFeedback(null), 6000);
   };
 
   return (
@@ -72,11 +75,23 @@ export const ValidationManager: React.FC<ValidationManagerProps> = ({
         </div>
       </div>
 
-      {/* Action Toast Feedback */}
+      {/* Action Toast Feedback with Direct Link to Invoicing */}
       {actionFeedback && (
-        <div className="p-4 bg-emerald-50 border border-emerald-300 text-emerald-900 rounded-2xl text-xs font-bold flex items-center gap-2 shadow-xs animate-fade-in">
-          <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
-          <span>{actionFeedback}</span>
+        <div className="p-4 bg-emerald-50 border border-emerald-300 text-emerald-900 rounded-2xl text-xs font-bold flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-xs animate-fade-in">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+            <span>{actionFeedback}</span>
+          </div>
+          {onNavigateToBilling && (
+            <button
+              type="button"
+              onClick={onNavigateToBilling}
+              className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-black text-xs transition-colors flex items-center gap-1 cursor-pointer shrink-0 shadow-sm"
+            >
+              <span>Ir para Faturamento & PIX</span>
+              <ArrowRight className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
       )}
 

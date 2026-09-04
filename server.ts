@@ -1168,10 +1168,35 @@ async function fetchAndParseSpreadsheetOrders(): Promise<any[]> {
         status = 'cancelada';
       }
 
+      // Check if server state already has advanced approval/invoice state for this OS
+      const existingInServer = (sharedAppState.orders || []).find((o: any) =>
+        o.osNumber && o.osNumber.trim().toUpperCase() === numOS.trim().toUpperCase()
+      );
+      const invoiceInServer = (sharedAppState.invoices || []).find((inv: any) =>
+        (inv.osNumbers || []).some((n: string) => n && n.trim().toUpperCase() === numOS.trim().toUpperCase())
+      );
+
+      if (invoiceInServer || existingInServer?.invoiceId || existingInServer?.status === 'faturada') {
+        status = invoiceInServer?.status === 'paga' || existingInServer?.status === 'paga' ? 'paga' : 'faturada';
+      } else if (existingInServer?.status === 'paga') {
+        status = 'paga';
+      } else if (existingInServer?.status === 'cancelada') {
+        status = 'cancelada';
+      } else if (existingInServer?.status === 'concluida') {
+        status = 'concluida';
+      }
+
+      const finalInvoiceNumber =
+        (invoiceNum && invoiceNum !== '-' && invoiceNum.trim() !== '')
+          ? invoiceNum.trim()
+          : (invoiceInServer?.invoiceNumber || existingInServer?.invoiceNumber);
+
+      const finalInvoiceId = invoiceInServer?.id || existingInServer?.invoiceId;
+
       orders.push({
-        id: `sheet-os-${numOS.replace(/[^a-zA-Z0-9]/g, '')}-${idx + 1}`,
+        id: existingInServer?.id || `sheet-os-${numOS.replace(/[^a-zA-Z0-9]/g, '')}-${idx + 1}`,
         osNumber: numOS,
-        clientId: `cli-${clientName.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 10)}`,
+        clientId: existingInServer?.clientId || `cli-${clientName.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 10)}`,
         clientName,
         clientDocument: clientDoc,
         workLocation: location,
@@ -1179,6 +1204,12 @@ async function fetchAndParseSpreadsheetOrders(): Promise<any[]> {
         title,
         description: itemsRaw,
         status,
+        validatedBy: existingInServer?.validatedBy || (status === 'concluida' || status === 'faturada' ? 'Faturamento WFS' : undefined),
+        validatedAt: existingInServer?.validatedAt || (status === 'concluida' || status === 'faturada' ? existingInServer?.createdAt : undefined),
+        validationNotes: existingInServer?.validationNotes,
+        invoiceId: finalInvoiceId,
+        invoiceNumber: finalInvoiceNumber,
+        invoicedAt: invoiceInServer?.issueDate || existingInServer?.invoicedAt,
         technicianName: agentName,
         agentName,
         startTime,
@@ -1196,7 +1227,6 @@ async function fetchAndParseSpreadsheetOrders(): Promise<any[]> {
           ? [{ id: `photo-${idx}`, url: fotoUrl, title: 'Foto Canhoto Drive', category: 'canhoto', timestamp: new Date().toISOString() }]
           : [],
         clientSignature: signature ? { signerName: signature, signedAt: new Date().toISOString() } : undefined,
-        invoiceNumber: invoiceNum !== '-' ? invoiceNum : undefined,
       });
     });
 

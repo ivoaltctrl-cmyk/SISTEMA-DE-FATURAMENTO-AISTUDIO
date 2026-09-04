@@ -149,8 +149,19 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
         {/* Logo & Header */}
         <div className="text-center space-y-3">
-          <div className="flex justify-center">
-            <WFSLogo size="md" />
+          <div className="flex justify-center items-center py-1">
+            <img
+              src="/wfs-logo.png"
+              alt="WFS – A SATS Company"
+              referrerPolicy="no-referrer"
+              className="h-12 sm:h-14 w-auto max-w-[220px] object-contain select-none transition-transform"
+              onError={(e) => {
+                const target = e.currentTarget as HTMLImageElement;
+                if (!target.src.includes('Imagem1.png')) {
+                  target.src = '/Imagem1.png';
+                }
+              }}
+            />
           </div>
 
           {!isFirstAccessMode ? (

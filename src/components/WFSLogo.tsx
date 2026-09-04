@@ -26,6 +26,12 @@ export const WFSLogo: React.FC<WFSLogoProps> = ({
         alt="WFS – A SATS Company"
         referrerPolicy="no-referrer"
         className={`w-auto ${sizeClasses[size]} object-contain`}
+        onError={(e) => {
+          const target = e.currentTarget as HTMLImageElement;
+          if (!target.src.includes('Imagem1.png')) {
+            target.src = '/Imagem1.png';
+          }
+        }}
       />
     </div>
   );

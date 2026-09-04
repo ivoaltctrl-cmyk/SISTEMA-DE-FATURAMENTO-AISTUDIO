@@ -187,6 +187,36 @@ export const updateSheetSystemStatus = async (
   };
 };
 
+// Dispatch real-time update to Google Sheets Apps Script webhook when OS status changes (approval/invoice)
+export const notifySheetOrderUpdate = async (order: ServiceOrder): Promise<void> => {
+  const cfg = getSheetsConfig();
+  if (!cfg.webhookUrl || !cfg.webhookUrl.startsWith('http')) return;
+
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 4000);
+    await fetch(cfg.webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      mode: 'no-cors',
+      signal: ctrl.signal,
+      body: JSON.stringify({
+        action: 'update_order_status',
+        osNumber: order.osNumber,
+        status: order.status,
+        invoiceNumber: order.invoiceNumber || '-',
+        validatedBy: order.validatedBy || '',
+        validatedAt: order.validatedAt || '',
+        invoicedAt: order.invoicedAt || '',
+        timestamp: new Date().toISOString(),
+      }),
+    });
+    clearTimeout(timer);
+  } catch (err) {
+    console.warn('Google Sheets Webhook notification notice:', err);
+  }
+};
+
 export interface SheetsSyncConfig {
   webhookUrl: string;
   autoSync: boolean;
@@ -1637,6 +1667,12 @@ function doPost(e) {
       }
     }
 
+    // Rota: Atualização de Status da OS & Nº da Fatura pelo Faturamento
+    if (payload.action === "update_order_status") {
+      var resOrderUp = atualizarStatusDaOrdemNaPlanilha(payload);
+      return ContentService.createTextOutput(JSON.stringify(resOrderUp)).setMimeType(ContentService.MimeType.JSON);
+    }
+
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var sheet = ss.getSheetByName(WFS_CONFIG.SHEET_NAME) || configurarAbaLancamentos();
     var data = payload.data || (Array.isArray(payload.orders) ? payload.orders : []);
@@ -1670,6 +1706,52 @@ function doPost(e) {
   } catch (err) {
     return ContentService.createTextOutput(JSON.stringify({ status: "error", message: err.toString() })).setMimeType(ContentService.MimeType.JSON);
   }
+}
+
+// 9.1 ATUALIZADOR DIRETO DE STATUS OPERACIONAL E FATURA NA PLANILHA
+function atualizarStatusDaOrdemNaPlanilha(data) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(WFS_CONFIG.SHEET_NAME) || ss.getSheets()[0];
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 5) return { success: false, message: "Nenhum lançamento encontrado na planilha." };
+
+  var targetNum = String(data.osNumber || "").replace(/[^0-9]/g, "");
+  var values = sheet.getRange(5, 1, lastRow - 4, 18).getValues();
+
+  var found = false;
+  var rowFound = -1;
+
+  for (var i = 0; i < values.length; i++) {
+    var rowNum = String(values[i][0] || "").replace(/[^0-9]/g, "");
+    if (rowNum === targetNum && targetNum !== "") {
+      var r = i + 5;
+      rowFound = r;
+      var statusFormatado = "CONCLUÍDA";
+      if (data.status === "faturada") statusFormatado = "FATURADA";
+      else if (data.status === "paga") statusFormatado = "PAGA";
+      else if (data.status === "cancelada") statusFormatado = "CANCELADA";
+      else if (data.status === "concluida") statusFormatado = "CONCLUÍDA";
+      else if (data.status === "em_andamento") statusFormatado = "EM ANDAMENTO";
+
+      // Coluna 10 (J): Status Operacional
+      sheet.getRange(r, 10).setValue(statusFormatado);
+
+      // Coluna 18 (R): Nº da Fatura
+      if (data.invoiceNumber && data.invoiceNumber !== "-") {
+        sheet.getRange(r, 18).setValue(data.invoiceNumber);
+      }
+      found = true;
+      break;
+    }
+  }
+
+  return {
+    success: found,
+    row: rowFound,
+    osNumber: data.osNumber,
+    status: data.status,
+    message: found ? "OS " + data.osNumber + " atualizada com sucesso na linha " + rowFound + " da Planilha Google!" : "OS não encontrada na planilha."
+  };
 }
 
 function doGet(e) {

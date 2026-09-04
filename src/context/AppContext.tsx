@@ -24,8 +24,10 @@ import {
   parseSheetRowsToOrders,
   saveSheetsConfig,
   syncOrdersWithGoogleSheets,
-  pushSingleOrderToGoogleSheet
+  pushSingleOrderToGoogleSheet,
+  notifySheetOrderUpdate,
 } from '../services/sheetsService';
+import { mergeOrdersPreservingBillingStatus } from '../utils/orderSync';
 import {
   mergeWithMasterUser,
   MASTER_ADMIN_USER,
@@ -289,6 +291,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const isRemoteInvoicesUpdateRef = useRef<boolean>(false);
   const bcRef = useRef<BroadcastChannel | null>(null);
 
+  // Always-fresh references to orders and invoices for async timers & webhooks
+  const ordersRef = useRef<ServiceOrder[]>(orders);
+  ordersRef.current = orders;
+
+  const invoicesRef = useRef<Invoice[]>(invoices);
+  invoicesRef.current = invoices;
+
   const [selectedOrderForDetail, setSelectedOrderForDetail] = useState<ServiceOrder | null>(null);
   const [selectedOrderForFieldMode, setSelectedOrderForFieldMode] = useState<ServiceOrder | null>(null);
   const [selectedOrderForPrint, setSelectedOrderForPrint] = useState<ServiceOrder | null>(null);
@@ -443,7 +452,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const ordensRes = await ordensApi.getAll();
         if (ordensRes.success && Array.isArray(ordensRes.orders) && ordensRes.orders.length > 0) {
           isRemoteOrdersUpdateRef.current = true;
-          setOrders(ordensRes.orders);
+          const merged = mergeOrdersPreservingBillingStatus(
+            ordersRef.current,
+            ordensRes.orders,
+            invoicesRef.current
+          );
+          setOrders(merged);
           setLastAutoSyncTime(new Date());
         } else {
           // Trigger immediate Google Sheets sync if server cache has no orders
@@ -502,7 +516,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (data.type === 'STATE_CHANGE' && data.appState) {
             if (Array.isArray(data.appState.orders)) {
               isRemoteOrdersUpdateRef.current = true;
-              setOrders(data.appState.orders);
+              const merged = mergeOrdersPreservingBillingStatus(
+                ordersRef.current,
+                data.appState.orders,
+                invoicesRef.current
+              );
+              setOrders(merged);
               setLastAutoSyncTime(new Date());
             }
             if (Array.isArray(data.appState.invoices)) {
@@ -540,7 +559,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             }
           } else if (ev.data?.type === 'LOCAL_ORDERS_UPDATE' && Array.isArray(ev.data.orders)) {
             isRemoteOrdersUpdateRef.current = true;
-            setOrders(ev.data.orders);
+            const merged = mergeOrdersPreservingBillingStatus(
+              ordersRef.current,
+              ev.data.orders,
+              invoicesRef.current
+            );
+            setOrders(merged);
             setLastAutoSyncTime(new Date());
           } else if (ev.data?.type === 'LOCAL_INVOICES_UPDATE' && Array.isArray(ev.data.invoices)) {
             isRemoteInvoicesUpdateRef.current = true;
@@ -553,10 +577,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // 4. Polling check for operational maintenance mode status every 5s
     const interval = setInterval(syncAllTiers, 5000);
 
-    // 5. Automatic periodic background Google Sheets sync every 20s (without blocking UI)
+    // 5. Automatic periodic background Google Sheets sync every 60s (without blocking UI)
     const autoSyncTimer = setInterval(() => {
       syncWithGoogleSheet(undefined, true).catch(() => {});
-    }, 20000);
+    }, 60000);
 
     return () => {
       if (eventSource) eventSource.close();
@@ -1108,6 +1132,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Validação pelo Time de Faturamento
   const validateOrder = (orderId: string, validatorName: string, notes?: string) => {
     const now = new Date().toISOString();
+    let updatedOrder: ServiceOrder | null = null;
+
     setOrders((prev) =>
       prev.map((o) => {
         if (o.id === orderId) {
@@ -1127,16 +1153,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             validationNotes: notes,
             auditLogs: [valLog, ...(o.auditLogs || [])],
           };
+          updatedOrder = updated;
           if (selectedOrderForDetail?.id === orderId) setSelectedOrderForDetail(updated);
           return updated;
         }
         return o;
       })
     );
+
+    // Persist immediately to server database/cache
+    fetch(`/api/ordens/${orderId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        status: 'concluida',
+        validatedBy: validatorName || currentUser?.name || 'Faturamento',
+        validatedAt: now,
+        validationNotes: notes,
+      }),
+    }).catch(() => {});
+
+    // Dispatch webhook to Google Sheets if configured
+    if (updatedOrder) {
+      notifySheetOrderUpdate(updatedOrder).catch(() => {});
+    }
   };
 
   const rejectOrderWithNotes = (orderId: string, rejectorName: string, notes: string) => {
     const now = new Date().toISOString();
+    let updatedOrder: ServiceOrder | null = null;
+
     setOrders((prev) =>
       prev.map((o) => {
         if (o.id === orderId) {
@@ -1154,12 +1200,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             validationNotes: `Solicitado ajuste: ${notes}`,
             auditLogs: [rejLog, ...(o.auditLogs || [])],
           };
+          updatedOrder = updated;
           if (selectedOrderForDetail?.id === orderId) setSelectedOrderForDetail(updated);
           return updated;
         }
         return o;
       })
     );
+
+    fetch(`/api/ordens/${orderId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        status: 'em_andamento',
+        validationNotes: `Solicitado ajuste: ${notes}`,
+      }),
+    }).catch(() => {});
+
+    if (updatedOrder) {
+      notifySheetOrderUpdate(updatedOrder).catch(() => {});
+    }
   };
 
   const signOrder = (
@@ -1322,6 +1382,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       details: `Fatura ${invoiceNumber} gerada no valor de R$ ${order.totalAmount.toFixed(2)}.`,
     };
 
+    let updatedSingleOrder: ServiceOrder | null = null;
     setOrders((prev) =>
       prev.map((o) => {
         if (o.id === orderId) {
@@ -1335,12 +1396,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             paymentDueDate: dueDate || defaultDueDate,
             auditLogs: [invoiceAudit, ...(o.auditLogs || [])],
           };
+          updatedSingleOrder = updated;
           if (selectedOrderForDetail?.id === orderId) setSelectedOrderForDetail(updated);
           return updated;
         }
         return o;
       })
     );
+
+    // Persist immediately to backend server
+    fetch(`/api/ordens/${orderId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        status: 'faturada',
+        invoiceId,
+        invoiceNumber,
+        invoicedAt: issueDate,
+        paymentMethod,
+        paymentDueDate: dueDate || defaultDueDate,
+      }),
+    }).catch(() => {});
+
+    if (updatedSingleOrder) {
+      notifySheetOrderUpdate(updatedSingleOrder).catch(() => {});
+    }
 
     return newInvoice;
   };
@@ -1388,22 +1468,45 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setInvoices((prev) => [newInvoice, ...prev]);
 
+    const updatedBatchOrders: ServiceOrder[] = [];
     setOrders((prev) =>
       prev.map((o) => {
         if (orderIds.includes(o.id)) {
-          return {
+          const up = {
             ...o,
-            status: 'faturada',
+            status: 'faturada' as const,
             invoicedAt: issueDate,
             invoiceId,
             invoiceNumber,
             paymentMethod,
             paymentDueDate: dueDate || defaultDueDate,
           };
+          updatedBatchOrders.push(up);
+          return up;
         }
         return o;
       })
     );
+
+    // Persist all batch orders to server and trigger webhooks
+    orderIds.forEach((oid) => {
+      fetch(`/api/ordens/${oid}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          status: 'faturada',
+          invoiceId,
+          invoiceNumber,
+          invoicedAt: issueDate,
+          paymentMethod,
+          paymentDueDate: dueDate || defaultDueDate,
+        }),
+      }).catch(() => {});
+    });
+
+    updatedBatchOrders.forEach((bo) => {
+      notifySheetOrderUpdate(bo).catch(() => {});
+    });
 
     return newInvoice;
   };
@@ -1579,16 +1682,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const result = await fetchOrdersFromGoogleSheet(sheetUrlOrId);
       if (result.success && result.orders.length > 0) {
-        // Replace orders with fresh sheet data so front-end faithfully mirrors the spreadsheet
-        const freshOrders = result.orders;
-        setOrders(freshOrders);
-        localStorage.setItem(`${LOCAL_STORAGE_KEY_PREFIX}orders`, JSON.stringify(freshOrders));
+        // Intelligently merge fresh sheet data preserving validated/invoiced status
+        const mergedOrders = mergeOrdersPreservingBillingStatus(
+          ordersRef.current,
+          result.orders,
+          invoicesRef.current
+        );
 
-        // Sync fresh orders to server state so all other clients get the exact same state
+        setOrders(mergedOrders);
+        localStorage.setItem(`${LOCAL_STORAGE_KEY_PREFIX}orders`, JSON.stringify(mergedOrders));
+
+        // Sync merged orders to server state so all other clients get the exact same consistent state
         fetch('/api/state', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ orders: freshOrders }),
+          body: JSON.stringify({ orders: mergedOrders }),
         }).catch(() => {});
 
         setLastAutoSyncTime(new Date());
@@ -1647,17 +1755,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (parsed.length === 0) {
         return { success: false, message: 'Nenhuma ordem identificada no texto/CSV fornecido.', count: 0 };
       }
-      setOrders(parsed);
-      localStorage.setItem(`${LOCAL_STORAGE_KEY_PREFIX}orders`, JSON.stringify(parsed));
+      const merged = mergeOrdersPreservingBillingStatus(ordersRef.current, parsed, invoicesRef.current);
+      setOrders(merged);
+      localStorage.setItem(`${LOCAL_STORAGE_KEY_PREFIX}orders`, JSON.stringify(merged));
       fetch('/api/state', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orders: parsed }),
+        body: JSON.stringify({ orders: merged }),
       }).catch(() => {});
 
       return {
         success: true,
-        message: `${parsed.length} ordens de serviço importadas com sucesso nas 18 colunas!`,
+        message: `${parsed.length} ordens de serviço processadas e integradas com sucesso!`,
         count: parsed.length,
       };
     } catch (e: any) {
