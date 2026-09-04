@@ -1081,6 +1081,13 @@ app.post('/api/state', (req: Request, res: Response) => {
     if (company) sharedAppState.company = company;
     sharedAppState.updatedAt = new Date().toISOString();
 
+    // Broadcast update to all other connected clients
+    broadcastSystemEvent({
+      type: 'STATE_CHANGE',
+      appState: sharedAppState,
+      timestamp: new Date().toISOString(),
+    });
+
     return res.status(200).json({ success: true, message: 'Estado global sincronizado no servidor.' });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err.message });
