@@ -1999,12 +1999,16 @@ function gerarHashSenha(senhaTexto) {
 
 function alterarSenhaUsuarioPlanilha(email, senhaAtual, novaSenha) {
   if (!email || !senhaAtual || !novaSenha) {
-    return { success: false, erro: "Preencha todos os campos obrigatórios." };
+    var errReq = "Preencha todos os campos obrigatórios.";
+    return { success: false, erro: errReq, error: errReq, message: errReq };
   }
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName(WFS_CONFIG.USERS_SHEET_NAME) || configurarAbaUsuarios();
   var lastRow = sheet.getLastRow();
-  if (lastRow < 2) return { success: false, erro: "Nenhum usuário cadastrado na planilha." };
+  if (lastRow < 2) {
+    var errEmpty = "Nenhum usuário cadastrado na planilha.";
+    return { success: false, erro: errEmpty, error: errEmpty, message: errEmpty };
+  }
 
   var values = sheet.getRange(2, 1, lastRow - 1, 4).getValues();
   var hashAtual = gerarHashSenha(senhaAtual);
@@ -2015,23 +2019,30 @@ function alterarSenhaUsuarioPlanilha(email, senhaAtual, novaSenha) {
     if (userEmail === email.toLowerCase().trim()) {
       var savedHash = String(values[i][3] || "").trim();
       if (savedHash && savedHash !== hashAtual) {
-        return { success: false, erro: "A senha atual fornecida está incorreta." };
+        var errWrong = "A senha atual fornecida está incorreta.";
+        return { success: false, erro: errWrong, error: errWrong, message: errWrong };
       }
       sheet.getRange(i + 2, 4).setValue(novoHash);
-      return { success: true, mensagem: "Senha alterada com sucesso!" };
+      var msgOk = "Senha alterada com sucesso!";
+      return { success: true, mensagem: msgOk, message: msgOk };
     }
   }
-  return { success: false, erro: "Usuário com o e-mail especificado não foi encontrado." };
+  var errNotFound = "Usuário com o e-mail especificado não foi encontrado.";
+  return { success: false, erro: errNotFound, error: errNotFound, message: errNotFound };
 }
 
 function resetarSenhaUsuarioPlanilha(adminEmail, targetEmail, novaSenha) {
   if (!adminEmail || !targetEmail || !novaSenha) {
-    return { success: false, erro: "Preencha todos os campos para o reset de senha." };
+    var errReq2 = "Preencha todos os campos para o reset de senha.";
+    return { success: false, erro: errReq2, error: errReq2, message: errReq2 };
   }
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName(WFS_CONFIG.USERS_SHEET_NAME) || configurarAbaUsuarios();
   var lastRow = sheet.getLastRow();
-  if (lastRow < 2) return { success: false, erro: "Nenhum usuário cadastrado na planilha." };
+  if (lastRow < 2) {
+    var errEmpty2 = "Nenhum usuário cadastrado na planilha.";
+    return { success: false, erro: errEmpty2, error: errEmpty2, message: errEmpty2 };
+  }
 
   var values = sheet.getRange(2, 1, lastRow - 1, 4).getValues();
   var novoHash = gerarHashSenha(novaSenha);
@@ -2040,10 +2051,12 @@ function resetarSenhaUsuarioPlanilha(adminEmail, targetEmail, novaSenha) {
     var userEmail = String(values[i][1] || "").toLowerCase().trim();
     if (userEmail === targetEmail.toLowerCase().trim()) {
       sheet.getRange(i + 2, 4).setValue(novoHash);
-      return { success: true, mensagem: "Senha do usuário " + targetEmail + " redefinida com sucesso pelo administrador!" };
+      var msgOk2 = "Senha do usuário " + targetEmail + " redefinida com sucesso pelo administrador!";
+      return { success: true, mensagem: msgOk2, message: msgOk2 };
     }
   }
-  return { success: false, erro: "Usuário não encontrado para redefinição." };
+  var errNotFound2 = "Usuário não encontrado para redefinição.";
+  return { success: false, erro: errNotFound2, error: errNotFound2, message: errNotFound2 };
 }
 
 /**
