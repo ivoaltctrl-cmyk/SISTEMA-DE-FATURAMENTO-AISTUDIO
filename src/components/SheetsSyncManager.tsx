@@ -43,7 +43,7 @@ import {
 } from '../services/sheetsService';
 
 export const SheetsSyncManager: React.FC = () => {
-  const { orders, company } = useApp();
+  const { orders, company, syncWithGoogleSheet } = useApp();
 
   const [config, setConfig] = useState<SheetsSyncConfig>(getSheetsConfig());
   const [webhookInput, setWebhookInput] = useState(config.webhookUrl || '');
@@ -97,11 +97,12 @@ export const SheetsSyncManager: React.FC = () => {
     setSyncFeedback(null);
 
     try {
-      const result = await syncOrdersWithGoogleSheets(orders, webhookInput.trim());
+      // Pull fresh data directly from the official Google Sheet (18 columns)
+      const result = await syncWithGoogleSheet(sheetUrlInput.trim() || undefined);
       const updated = getSheetsConfig();
       setConfig(updated);
       setSyncFeedback({
-        type: 'success',
+        type: result.success ? 'success' : 'error',
         message: result.message,
       });
     } catch (err: any) {
