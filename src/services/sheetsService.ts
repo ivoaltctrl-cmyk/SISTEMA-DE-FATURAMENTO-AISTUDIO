@@ -270,9 +270,11 @@ export const uploadPhotoToGoogleDrive = async (
     webhookUrl: cfg.webhookUrl,
   };
 
+  // 1. Tentar envio seguro pelo Back-End Proxy (/api/drive/upload-canhoto)
+  let lastBackendError = '';
   try {
     const localCtrl = new AbortController();
-    const localTimeout = setTimeout(() => localCtrl.abort(), 35000);
+    const localTimeout = setTimeout(() => localCtrl.abort(), 40000);
 
     const backendRes = await fetch('/api/drive/upload-canhoto', {
       method: 'POST',
@@ -298,13 +300,61 @@ export const uploadPhotoToGoogleDrive = async (
     }
 
     const errData = await backendRes.json().catch(() => null);
-    throw new Error(errData?.error || `Erro HTTP ${backendRes.status} no envio para o Drive`);
+    lastBackendError = errData?.error || `Erro HTTP ${backendRes.status} no envio para o Drive`;
   } catch (backendErr: any) {
-    console.error('Falha no upload via proxy:', backendErr);
-    throw new Error(
-      backendErr.message || 'Falha ao salvar a imagem no Google Drive. Verifique as configurações.'
-    );
+    console.warn('Falha na tentativa via proxy /api/drive/upload-canhoto:', backendErr);
+    lastBackendError = backendErr.message || 'Falha de conexão com o servidor local';
   }
+
+  // 2. FALLBACK DIRETO AO GOOGLE APPS SCRIPT WEBHOOK:
+  // Se o frontend estiver rodando em ambiente estático (ex: Cloudflare Pages / pages.dev,
+  // onde rotas /api retornam HTTP 405 Method Not Allowed) ou o backend estiver indisponível,
+  // tenta enviar diretamente para o Webhook do Google Apps Script configurado.
+  if (cfg.webhookUrl && typeof cfg.webhookUrl === 'string' && cfg.webhookUrl.startsWith('http')) {
+    try {
+      const directCtrl = new AbortController();
+      const directTimeout = setTimeout(() => directCtrl.abort(), 35000);
+
+      // Usar text/plain;charset=utf-8 para evitar preflight OPTIONS que causa HTTP 405 no Apps Script
+      const directRes = await fetch(cfg.webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        signal: directCtrl.signal,
+        body: JSON.stringify({
+          action: 'upload_drive_canhoto',
+          driveFolderId: folderId,
+          fileName: targetFileName,
+          imageBase64: base64Image,
+          osNumber: cleanOS,
+          clientName: clientName || 'WFS Operacional',
+          serviceTitle: serviceTitle || 'Canhoto Enviado ao Drive',
+        }),
+      });
+      clearTimeout(directTimeout);
+
+      const directData = await directRes.json().catch(() => null);
+      if (directRes.ok && directData && directData.success) {
+        return {
+          success: true,
+          fileUrl: directData.fileUrl || directData.driveUrl || `https://drive.google.com/drive/folders/${folderId}`,
+          folderUrl: folderUrl,
+          folderId: folderId,
+          sheetName: photosSheet,
+          fileName: targetFileName,
+          message: directData.mensagem || directData.message || `Imagem salva com sucesso na pasta Fotos_SO do Google Drive (ID: ${folderId}).`,
+        };
+      } else if (directData && (directData.erro || directData.error)) {
+        throw new Error(directData.erro || directData.error);
+      }
+    } catch (directErr: any) {
+      console.warn('Fallback direto ao Webhook falhou:', directErr);
+      if (directErr.message && !directErr.message.includes('fetch') && !directErr.message.includes('network')) {
+        throw directErr;
+      }
+    }
+  }
+
+  throw new Error(lastBackendError || 'Falha ao salvar a imagem no Google Drive. Verifique a URL do Webhook e tente novamente.');
 };
 
 // Helper: Calculate duration between HH:mm start and end

@@ -1704,24 +1704,18 @@ app.post('/api/drive/upload-canhoto', async (req: Request, res: Response) => {
 
     if (targetWebhook) {
       try {
-        const gasRes = await fetch(targetWebhook, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            action: 'upload_drive_canhoto',
-            apiSecret: WFS_API_SECRET,
-            apiToken: WFS_API_SECRET,
-            driveFolderId: targetFolderId,
-            fileName: targetFileName,
-            imageBase64: imageBase64,
-            osNumber: cleanOS,
-            clientName: clientName || 'WFS Operacional',
-            serviceTitle: serviceTitle || 'Canhoto Enviado ao Drive',
-          }),
-        });
+        const webhookRes = await sendToGoogleAppsScriptWebhook({
+          action: 'upload_drive_canhoto',
+          driveFolderId: targetFolderId,
+          fileName: targetFileName,
+          imageBase64: imageBase64,
+          osNumber: cleanOS,
+          clientName: clientName || 'WFS Operacional',
+          serviceTitle: serviceTitle || 'Canhoto Enviado ao Drive',
+        }, targetWebhook);
 
-        const gasData = (await gasRes.json().catch(() => null)) as any;
-        if (gasData && gasData.success) {
+        if (webhookRes.success) {
+          const gasData = webhookRes.data || {};
           const fileUrl = gasData.fileUrl || gasData.driveUrl || `https://drive.google.com/drive/folders/${targetFolderId}`;
           broadcastSystemEvent({
             type: 'canhoto-uploaded',
@@ -1742,11 +1736,13 @@ app.post('/api/drive/upload-canhoto', async (req: Request, res: Response) => {
             folderId: targetFolderId,
             sheetName: PHOTOS_SHEET_NAME,
             fileName: targetFileName,
-            message: gasData.mensagem || 'Foto salva com sucesso na pasta de entrada do Google Drive!',
+            message: gasData.mensagem || gasData.message || 'Foto salva com sucesso na pasta de entrada do Google Drive!',
           });
         } else {
-          const errMsg = gasData?.erro || gasData?.message || `Google Apps Script retornou erro (Status HTTP ${gasRes.status}).`;
-          return res.status(502).json({ success: false, error: errMsg });
+          return res.status(502).json({
+            success: false,
+            error: webhookRes.error || 'Google Apps Script não conseguiu processar o envio ao Drive.'
+          });
         }
       } catch (proxyErr: any) {
         console.error('Failed to proxy upload to Google Apps Script Webhook:', proxyErr);
