@@ -513,6 +513,14 @@ export const SheetsSyncManager: React.FC = () => {
                 <li>No Apps Script da planilha, crie ou selecione o arquivo <code>Webhook.gs</code>.</li>
                 <li>Cole o código copiado e clique no <strong>Salvar (Disquete)</strong>.</li>
                 <li>
+                  <strong>🔒 Cofre de Segurança (Script Properties):</strong> No menu lateral esquerdo do Apps Script, clique em <strong>Configurações do Projeto (ícone de engrenagem)</strong> &gt; <strong>Propriedades do script</strong> &gt; <strong>Adicionar propriedade de script</strong>:
+                  <ul className="list-disc list-inside pl-4 mt-1 space-y-0.5 font-mono text-[11px] text-slate-800 bg-amber-50/80 p-2 rounded-lg border border-amber-200">
+                    <li>Propriedade: <strong>API_SECRET</strong></li>
+                    <li>Valor: <em>O mesmo segredo definido na variável WFS_API_SECRET do servidor</em></li>
+                  </ul>
+                  <span className="text-[11px] text-amber-900 block mt-1">Dessa forma, o segredo nunca fica exposto no código ou em requisições de clientes.</span>
+                </li>
+                <li>
                   No topo direito, clique em <strong>Implantar &gt; Nova implantação</strong> (ou <em>Gerenciar implantações</em>).
                 </li>
                 <li>

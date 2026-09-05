@@ -117,84 +117,53 @@ export const pushSingleOrderToGoogleSheet = async (
   return false;
 };
 
-// Update Google Sheets "Status" tab via Apps Script Webhook or Backend Proxy
+// Update Google Sheets "Status" tab via Backend Proxy (which securely communicates with Google Apps Script using server-side WFS_API_SECRET)
 export const updateSheetSystemStatus = async (
   status: 'ABERTO' | 'FECHADO',
   updatedBy = 'ivoaltctrl@gmail.com'
 ): Promise<{ success: boolean; message: string }> => {
   const cfg = getSheetsConfig();
-  let webhookTriggered = false;
 
-  // 1. If Webhook URL configured, send payload to Google Apps Script
-  if (cfg.webhookUrl && cfg.webhookUrl.startsWith('http')) {
-    try {
-      await fetch(cfg.webhookUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        mode: 'no-cors',
-        body: JSON.stringify({
-          action: 'update_system_status',
-          status: status,
-          isMaintenanceMode: status === 'FECHADO',
-          sheetName: OFFICIAL_STATUS_SHEET_NAME,
-          updatedBy: updatedBy,
-          timestamp: new Date().toISOString(),
-        }),
-      });
-      webhookTriggered = true;
-    } catch (err) {
-      console.warn('Erro ao atualizar status via Webhook da Planilha:', err);
-    }
-  }
-
-  // 2. Also notify Backend Proxy to keep in-memory & server cache in sync
   try {
-    await fetch('/api/system/maintenance', {
+    const res = await fetch('/api/system/maintenance', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         status: status,
         active: status === 'FECHADO',
         adminEmail: updatedBy,
+        webhookUrl: cfg.webhookUrl || '',
       }),
     });
-  } catch {}
-
-  return {
-    success: true,
-    message: webhookTriggered
-      ? `Status [${status}] enviado para a Planilha Google (Aba Status) e atualizado no sistema.`
-      : `Status [${status}] atualizado no sistema local e nuvem.`,
-  };
+    const data = await res.json().catch(() => null);
+    return {
+      success: res.ok,
+      message: data?.message || `Status [${status}] sincronizado pelo servidor com a Planilha Google.`,
+    };
+  } catch (err: any) {
+    console.warn('Erro ao atualizar status via backend:', err);
+    return {
+      success: false,
+      message: `Erro ao atualizar status do sistema: ${err?.message || 'Falha de conexão'}`,
+    };
+  }
 };
 
-// Dispatch real-time update to Google Sheets Apps Script webhook when OS status changes (approval/invoice)
+// Dispatch real-time update to Google Sheets Apps Script webhook via backend server (protecting API_SECRET)
 export const notifySheetOrderUpdate = async (order: ServiceOrder): Promise<void> => {
   const cfg = getSheetsConfig();
-  if (!cfg.webhookUrl || !cfg.webhookUrl.startsWith('http')) return;
 
   try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 4000);
-    await fetch(cfg.webhookUrl, {
+    await fetch('/api/sheets/notify-order-status', {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      mode: 'no-cors',
-      signal: ctrl.signal,
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        action: 'update_order_status',
-        osNumber: order.osNumber,
-        status: order.status,
-        invoiceNumber: order.invoiceNumber || '-',
-        validatedBy: order.validatedBy || '',
-        validatedAt: order.validatedAt || '',
-        invoicedAt: order.invoicedAt || '',
-        timestamp: new Date().toISOString(),
+        order,
+        webhookUrl: cfg.webhookUrl || '',
       }),
     });
-    clearTimeout(timer);
   } catch (err) {
-    console.warn('Google Sheets Webhook notification notice:', err);
+    console.warn('Falha ao notificar atualização de status via backend:', err);
   }
 };
 
@@ -292,7 +261,6 @@ export const uploadPhotoToGoogleDrive = async (
   }
 
   const payload = {
-    action: 'upload_drive_canhoto',
     imageBase64: base64Image,
     fileName: targetFileName,
     osNumber: cleanOS,
@@ -302,117 +270,41 @@ export const uploadPhotoToGoogleDrive = async (
     webhookUrl: cfg.webhookUrl,
   };
 
-  let uploadSuccess = false;
-  let resultFileUrl = '';
-  let resultMessage = '';
-  let lastErrorDetail = '';
+  try {
+    const localCtrl = new AbortController();
+    const localTimeout = setTimeout(() => localCtrl.abort(), 35000);
 
-  // 1. CANAL PRINCIPAL: Envio DIRETO para o Google Apps Script Webhook (se configurado)
-  // Funciona no Preview, Cloud Run, Produção e Mobile sem depender de proxy intermediário
-  if (cfg.webhookUrl && cfg.webhookUrl.startsWith('http')) {
-    try {
-      const gasCtrl = new AbortController();
-      const gasTimeout = setTimeout(() => gasCtrl.abort(), 35000);
+    const backendRes = await fetch('/api/drive/upload-canhoto', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: localCtrl.signal,
+      body: JSON.stringify(payload),
+    });
+    clearTimeout(localTimeout);
 
-      const gasRes = await fetch(cfg.webhookUrl, {
-        method: 'POST',
-        headers: {
-          // text/plain evita requisição preflight OPTIONS (CORS) que o Google Apps Script não aceita
-          'Content-Type': 'text/plain;charset=utf-8',
-        },
-        body: JSON.stringify(payload),
-        signal: gasCtrl.signal,
-      });
-      clearTimeout(gasTimeout);
-
-      if (gasRes.ok) {
-        const gasData = await gasRes.json().catch(() => null);
-        if (gasData && (gasData.success || gasData.driveUrl || gasData.fileUrl)) {
-          uploadSuccess = true;
-          resultFileUrl = gasData.fileUrl || gasData.driveFileUrl || gasData.driveUrl || `https://drive.google.com/drive/folders/${folderId}`;
-          resultMessage = gasData.mensagem || gasData.message || 'Foto salva com sucesso na pasta Fotos_SO do Google Drive!';
-        } else if (gasData && (gasData.erro || gasData.error)) {
-          lastErrorDetail = gasData.erro || gasData.error;
-        }
-      } else {
-        lastErrorDetail = `Webhook do Google Apps Script retornou HTTP ${gasRes.status}.`;
-      }
-    } catch (gasErr: any) {
-      console.warn('Tentativa de envio direto via Webhook falhou, tentando canal local:', gasErr);
-      lastErrorDetail = gasErr.message || '';
-    }
-  }
-
-  // 2. CANAL SECUNDÁRIO: Backend Proxy local (/api/drive/upload-canhoto)
-  if (!uploadSuccess) {
-    try {
-      const localCtrl = new AbortController();
-      const localTimeout = setTimeout(() => localCtrl.abort(), 25000);
-
-      const backendRes = await fetch('/api/drive/upload-canhoto', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: localCtrl.signal,
-        body: JSON.stringify(payload),
-      });
-      clearTimeout(localTimeout);
-
-      if (backendRes.ok) {
-        const backendResult = await backendRes.json().catch(() => null);
-        if (backendResult && backendResult.success) {
-          uploadSuccess = true;
-          resultFileUrl = backendResult.fileUrl || `https://drive.google.com/drive/folders/${folderId}`;
-          resultMessage = backendResult.message || 'Foto salva com sucesso na pasta do Google Drive!';
-        }
-      } else if (backendRes.status === 405 || backendRes.status === 404) {
-        // HTTP 405 ocorre quando a hospedagem web estática (Shared App / Cloud Run preview) não aceita métodos POST em rotas locais
-        if (!cfg.webhookUrl) {
-          throw new Error(
-            'URL do Webhook do Google Apps Script não configurada. Na versão web/compartilhada, configure o link do Webhook na aba Governança > Sincronização para enviar fotos diretamente ao Google Drive.'
-          );
-        } else {
-          throw new Error(
-            'O servidor web estático recusou a rota local (HTTP 405). Verifique se o Webhook do Google Apps Script está ativo e implantado na versão mais recente.'
-          );
-        }
-      } else {
-        const errData = await backendRes.json().catch(() => null);
-        throw new Error(errData?.error || `Erro HTTP ${backendRes.status} no envio para o Drive`);
-      }
-    } catch (backendErr: any) {
-      console.error('Falha no upload via proxy:', backendErr);
-      if (!uploadSuccess) {
-        const msg = backendErr.message || '';
-        if (msg.includes('405') || msg.includes('Method Not Allowed')) {
-          throw new Error(
-            'Servidor Web Estático (HTTP 405): Para salvar arquivos no Drive nesta versão compartilhada, configure a URL do Webhook do Google Apps Script na aba Governança > Sincronização Google Sheets.'
-          );
-        }
-        throw new Error(
-          backendErr.message ||
-          lastErrorDetail ||
-          'Falha ao salvar a imagem na pasta do Google Drive. Verifique a URL do Webhook nas configurações.'
-        );
+    if (backendRes.ok) {
+      const backendResult = await backendRes.json().catch(() => null);
+      if (backendResult && backendResult.success) {
+        return {
+          success: true,
+          fileUrl: backendResult.fileUrl || `https://drive.google.com/drive/folders/${folderId}`,
+          folderUrl: folderUrl,
+          folderId: folderId,
+          sheetName: photosSheet,
+          fileName: targetFileName,
+          message: backendResult.message || `Imagem salva com sucesso na pasta Fotos_SO do Google Drive (ID: ${folderId}).`,
+        };
       }
     }
-  }
 
-  if (!uploadSuccess) {
+    const errData = await backendRes.json().catch(() => null);
+    throw new Error(errData?.error || `Erro HTTP ${backendRes.status} no envio para o Drive`);
+  } catch (backendErr: any) {
+    console.error('Falha no upload via proxy:', backendErr);
     throw new Error(
-      lastErrorDetail ||
-      'Não foi possível salvar o arquivo na pasta do Drive. Verifique a URL do Webhook em Governança > Sincronização.'
+      backendErr.message || 'Falha ao salvar a imagem no Google Drive. Verifique as configurações.'
     );
   }
-
-  return {
-    success: true,
-    fileUrl: resultFileUrl || `https://drive.google.com/drive/folders/${folderId}`,
-    folderUrl: folderUrl,
-    folderId: folderId,
-    sheetName: photosSheet,
-    fileName: targetFileName,
-    message: resultMessage || `Imagem salva com sucesso na pasta de entrada do Drive (ID: ${folderId}). O Robô IA Vision iniciará a leitura.`,
-  };
 };
 
 // Helper: Calculate duration between HH:mm start and end
@@ -1118,21 +1010,22 @@ export const syncOrdersWithGoogleSheets = async (
 
   if (targetUrl && targetUrl.trim().startsWith('http')) {
     try {
-      await fetch(targetUrl.trim(), {
+      const res = await fetch('/api/sheets/sync-orders', {
         method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          action: 'sync_all_orders',
-          timestamp: new Date().toISOString(),
+          rows,
           ordersCount: orders.length,
-          data: rows,
+          webhookUrl: targetUrl.trim(),
         }),
       });
+
+      const resData = await res.json().catch(() => null);
 
       const updatedCfg: SheetsSyncConfig = {
         ...cfg,
         lastSyncTime: new Date().toISOString(),
-        lastSyncStatus: 'success',
+        lastSyncStatus: res.ok ? 'success' : 'error',
         lastSyncCount: orders.length,
         syncHistory: [
           {
@@ -1140,19 +1033,23 @@ export const syncOrdersWithGoogleSheets = async (
             timestamp: new Date().toISOString(),
             action: 'Envio para Planilha Google Sheets',
             osCount: orders.length,
-            status: 'success',
-            message: `${orders.length} ordens gravadas com sucesso no Google Sheets.`,
+            status: res.ok ? 'success' : 'error',
+            message: res.ok
+              ? `${orders.length} ordens gravadas com sucesso no Google Sheets.`
+              : `Erro: ${resData?.error || 'Falha na sincronização via servidor'}`,
           },
           ...(cfg.syncHistory || []).slice(0, 9),
         ],
       };
       saveSheetsConfig(updatedCfg);
 
-      return {
-        success: true,
-        message: `Planilha Google Sheets atualizada com sucesso (${orders.length} ordens sincronizadas com as 18 colunas).`,
-        rowCount: orders.length,
-      };
+      if (res.ok) {
+        return {
+          success: true,
+          message: `Planilha Google Sheets atualizada com sucesso (${orders.length} ordens sincronizadas com as 18 colunas).`,
+          rowCount: orders.length,
+        };
+      }
     } catch (err: any) {
       console.warn('Google Sheets Webhook Sync failed:', err);
     }
@@ -1605,6 +1502,14 @@ export const generateWebhookScriptCode = (
  * EMPRESA: ${companyName}
  * PROPRIETÁRIO: ${ownerEmail}
  * ============================================================================
+ * 🔒 SEGURANÇA (SCRIPT PROPERTIES):
+ * O segredo de autenticação deve ser configurado nas Propriedades do Script:
+ * No editor do Google Apps Script:
+ * 1. Clique em 'Configurações do Projeto' (ícone de engrenagem no menu lateral)
+ * 2. Role até 'Propriedades do script' e clique em 'Adicionar propriedade'
+ * 3. Propriedade: API_SECRET
+ * 4. Valor: o mesmo token configurado no servidor (WFS_API_SECRET)
+ * ============================================================================
  */
 
 var WFS_CONFIG = {
@@ -1612,6 +1517,8 @@ var WFS_CONFIG = {
   PRIMARY_COLOR: "#991B1B",
   DARK_COLOR: "#0F172A",
   OWNER_EMAIL: "${ownerEmail}",
+  // Obtido com segurança do cofre do Google Apps Script (Script Properties)
+  API_SECRET: PropertiesService.getScriptProperties().getProperty("API_SECRET") || "COLE_AQUI_A_API_SECRET_DAS_SCRIPT_PROPERTIES",
   DRIVE_FOLDER_ID: "1vDmx3GHFH_4FWfcNkPaOX7m3aH_yuFjD",
   PROCESSED_SUBFOLDER_NAME: "Processados",
   SHEET_NAME: "Lançamentos Campo",
@@ -1766,6 +1673,18 @@ function doPost(e) {
 
     var action = payload.action || "";
 
+    // 0. VERIFICAÇÃO DE SEGURANÇA: Token de autorização compartilhado (WFS_CONFIG.API_SECRET)
+    // Impede que chamadas diretas não autorizadas contra a URL do Webhook alterem dados na planilha
+    var tokenRecebido = String(payload.apiToken || payload.apiSecret || payload.token || "").trim();
+    if (WFS_CONFIG.API_SECRET && tokenRecebido !== WFS_CONFIG.API_SECRET) {
+      return jsonResponse({
+        success: false,
+        erro: "Acesso negado: Token de autorização inválido ou ausente. Requisição direta não permitida.",
+        error: "Acesso negado: Token de autorização inválido ou ausente.",
+        message: "Acesso negado: Token de autorização inválido ou ausente."
+      });
+    }
+
     // 3.1 Atualizar Status do Sistema (ABERTO / FECHADO)
     if (action === "update_system_status" || action === "set_status" || payload.status) {
       var statusNovo = (payload.status || "ABERTO").toUpperCase();
@@ -1799,12 +1718,19 @@ function doPost(e) {
 
     // 3.5 Alteração de Senha do Próprio Usuário
     if (action === "user_change_password") {
-      return jsonResponse(alterarSenhaUsuarioPlanilha(payload.email, payload.currentPassword, payload.newPassword));
+      var pwd = payload.passwordHash || payload.newPassword || "";
+      return jsonResponse(alterarSenhaUsuarioPlanilha(payload.email, payload.currentPassword, pwd, payload));
     }
 
     // 3.6 Reset de Senha pelo Administrador
     if (action === "admin_reset_user_password") {
-      return jsonResponse(resetarSenhaUsuarioPlanilha(payload.adminEmail, payload.targetEmail, payload.newPassword));
+      var pwd2 = payload.passwordHash || payload.newPassword || "";
+      return jsonResponse(resetarSenhaUsuarioPlanilha(payload.adminEmail, payload.targetEmail, pwd2));
+    }
+
+    // 3.7 Criação ou Sincronização de Usuário na Planilha
+    if (action === "create_user" || action === "sync_user") {
+      return jsonResponse(cadastrarUsuarioPlanilha(payload));
     }
 
     return jsonResponse({ success: false, erro: "Ação não reconhecida: " + action });
@@ -2055,16 +1981,19 @@ function configurarAbaStatus() {
  */
 function configurarAbaUsuarios() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName(WFS_CONFIG.USERS_SHEET_NAME);
+  var sheet = ss.getSheetByName("Usuários") || ss.getSheetByName("Usuarios") || ss.getSheetByName(WFS_CONFIG.USERS_SHEET_NAME);
   if (!sheet) {
-    sheet = ss.insertSheet(WFS_CONFIG.USERS_SHEET_NAME);
+    sheet = ss.insertSheet("Usuários");
   }
-  sheet.getRange("A1:D1").setValues([["NOME", "EMAIL", "PERFIL", "SENHA_HASH_SHA256"]])
-       .setBackground(WFS_CONFIG.DARK_COLOR).setFontColor("#FFFFFF").setFontWeight("bold").setHorizontalAlignment("center");
+  if (sheet.getLastRow() < 1) {
+    sheet.getRange("A1:G1").setValues([["NOME", "EMAIL", "CARGO / SETOR", "SENHA_HASH", "PERFIL", "PRIMEIRO_ACESSO", "ATIVO"]])
+         .setBackground(WFS_CONFIG.DARK_COLOR).setFontColor("#FFFFFF").setFontWeight("bold").setHorizontalAlignment("center");
+  }
   return sheet;
 }
 
 function gerarHashSenha(senhaTexto) {
+  if (!senhaTexto) return "";
   var rawHash = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, senhaTexto, Utilities.Charset.UTF_8);
   var txtHash = "";
   for (var i = 0; i < rawHash.length; i++) {
@@ -2077,66 +2006,218 @@ function gerarHashSenha(senhaTexto) {
   return txtHash;
 }
 
-function alterarSenhaUsuarioPlanilha(email, senhaAtual, novaSenha) {
-  if (!email || !senhaAtual || !novaSenha) {
-    var errReq = "Preencha todos os campos obrigatórios.";
+function alterarSenhaUsuarioPlanilha(email, senhaAtual, novaSenha, opt) {
+  if (!email || !novaSenha) {
+    var errReq = "Preencha o e-mail e a nova senha.";
     return { success: false, erro: errReq, error: errReq, message: errReq };
   }
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName(WFS_CONFIG.USERS_SHEET_NAME) || configurarAbaUsuarios();
+  var sheet = ss.getSheetByName("Usuários") || ss.getSheetByName("Usuarios") || ss.getSheetByName(WFS_CONFIG.USERS_SHEET_NAME) || configurarAbaUsuarios();
   var lastRow = sheet.getLastRow();
-  if (lastRow < 2) {
-    var errEmpty = "Nenhum usuário cadastrado na planilha.";
-    return { success: false, erro: errEmpty, error: errEmpty, message: errEmpty };
+
+  // Identificação dinâmica de colunas a partir do cabeçalho na linha 1
+  var headers = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 7)).getValues()[0];
+  var colEmail = -1;
+  var colSenha = -1;
+  var colPrimeiro = -1;
+
+  for (var c = 0; c < headers.length; c++) {
+    var h = String(headers[c] || "").toUpperCase().trim();
+    if (h === "EMAIL" || h === "E-MAIL") colEmail = c + 1;
+    if (h.indexOf("SENHA") !== -1 || h.indexOf("HASH") !== -1) colSenha = c + 1;
+    if (h.indexOf("PRIMEIRO") !== -1) colPrimeiro = c + 1;
   }
 
-  var values = sheet.getRange(2, 1, lastRow - 1, 4).getValues();
-  var hashAtual = gerarHashSenha(senhaAtual);
-  var novoHash = gerarHashSenha(novaSenha);
+  if (colEmail === -1) colEmail = 2; // Coluna B
+  if (colSenha === -1) colSenha = 4; // Coluna D
+  if (colPrimeiro === -1 && headers.length >= 6) colPrimeiro = 6; // Coluna F
 
-  for (var i = 0; i < values.length; i++) {
-    var userEmail = String(values[i][1] || "").toLowerCase().trim();
-    if (userEmail === email.toLowerCase().trim()) {
-      var savedHash = String(values[i][3] || "").trim();
-      if (savedHash && savedHash !== hashAtual) {
-        var errWrong = "A senha atual fornecida está incorreta.";
-        return { success: false, erro: errWrong, error: errWrong, message: errWrong };
+  var novoHash = (novaSenha.length === 64 && /^[0-9a-fA-F]+$/.test(novaSenha)) ? novaSenha : gerarHashSenha(novaSenha);
+
+  if (lastRow >= 2) {
+    var numCols = Math.max(sheet.getLastColumn(), 7);
+    var values = sheet.getRange(2, 1, lastRow - 1, numCols).getValues();
+    for (var i = 0; i < values.length; i++) {
+      var userEmail = String(values[i][colEmail - 1] || "").toLowerCase().trim();
+      if (userEmail === email.toLowerCase().trim()) {
+        var rowNum = i + 2;
+        var savedHash = String(values[i][colSenha - 1] || "").trim().toLowerCase();
+        var primeiroAcessoVal = colPrimeiro !== -1 ? String(values[i][colPrimeiro - 1] || "").toUpperCase().trim() : "";
+        var isPrimeiroAcesso = (primeiroAcessoVal === "SIM" || primeiroAcessoVal === "TRUE");
+
+        // VALIDAÇÃO DA SENHA ATUAL:
+        // Se a senha já estiver salva na planilha, é estritamente obrigatório que a senha atual informada coincida
+        if (savedHash) {
+          var cleanAtual = String(senhaAtual || "").trim();
+          var hashAtual = gerarHashSenha(cleanAtual).toLowerCase();
+          var confere = (hashAtual === savedHash) || (cleanAtual.toLowerCase() === savedHash);
+
+          // No caso de primeiro acesso, aceita também se a senha digitada for a temporária padrão
+          if (!confere && isPrimeiroAcesso) {
+            confere = (cleanAtual === "123456" || cleanAtual === "admin" || cleanAtual === "123" || hashAtual === gerarHashSenha("123456") || hashAtual === gerarHashSenha("admin"));
+          }
+
+          if (!confere) {
+            var errPass = "A senha atual fornecida está incorreta.";
+            return { success: false, erro: errPass, error: errPass, message: errPass };
+          }
+        }
+
+        sheet.getRange(rowNum, colSenha).setValue(novoHash);
+        if (colPrimeiro !== -1) {
+          sheet.getRange(rowNum, colPrimeiro).setValue("NÃO");
+        }
+        var msgOk = "Senha do usuário " + email + " atualizada com sucesso na planilha (linha " + rowNum + ")!";
+        return { success: true, mensagem: msgOk, message: msgOk, row: rowNum };
       }
-      sheet.getRange(i + 2, 4).setValue(novoHash);
-      var msgOk = "Senha alterada com sucesso!";
-      return { success: true, mensagem: msgOk, message: msgOk };
     }
   }
-  var errNotFound = "Usuário com o e-mail especificado não foi encontrado.";
-  return { success: false, erro: errNotFound, error: errNotFound, message: errNotFound };
+
+  // Se o usuário não existia na planilha, cadastra diretamente
+  var isMaster = email.toLowerCase().trim() === String(WFS_CONFIG.OWNER_EMAIL || "").toLowerCase().trim();
+  var novaLinha = [
+    isMaster ? "Ivo (Master Admin)" : email.split("@")[0],
+    email.toLowerCase().trim(),
+    isMaster ? "Diretoria / TI" : "Operações GSE",
+    novoHash,
+    isMaster ? "ADMINISTRADOR" : "OPERADOR",
+    "NÃO",
+    "SIM"
+  ];
+  sheet.appendRow(novaLinha);
+  var appendRow = sheet.getLastRow();
+  var msgAppend = "Usuário " + email + " cadastrado e senha gravada com sucesso na planilha!";
+  return { success: true, mensagem: msgAppend, message: msgAppend, row: appendRow };
 }
 
 function resetarSenhaUsuarioPlanilha(adminEmail, targetEmail, novaSenha) {
-  if (!adminEmail || !targetEmail || !novaSenha) {
-    var errReq2 = "Preencha todos os campos para o reset de senha.";
+  if (!targetEmail || !novaSenha) {
+    var errReq2 = "Preencha o e-mail do usuário e a nova senha temporária.";
     return { success: false, erro: errReq2, error: errReq2, message: errReq2 };
   }
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName(WFS_CONFIG.USERS_SHEET_NAME) || configurarAbaUsuarios();
+  var sheet = ss.getSheetByName("Usuários") || ss.getSheetByName("Usuarios") || ss.getSheetByName(WFS_CONFIG.USERS_SHEET_NAME) || configurarAbaUsuarios();
   var lastRow = sheet.getLastRow();
-  if (lastRow < 2) {
-    var errEmpty2 = "Nenhum usuário cadastrado na planilha.";
-    return { success: false, erro: errEmpty2, error: errEmpty2, message: errEmpty2 };
+
+  var headers = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 7)).getValues()[0];
+  var colEmail = -1;
+  var colPerfil = -1;
+  var colSenha = -1;
+  var colPrimeiro = -1;
+
+  for (var c = 0; c < headers.length; c++) {
+    var h = String(headers[c] || "").toUpperCase().trim();
+    if (h === "EMAIL" || h === "E-MAIL") colEmail = c + 1;
+    if (h.indexOf("PERFIL") !== -1 || h.indexOf("PRIVIL") !== -1) colPerfil = c + 1;
+    if (h.indexOf("SENHA") !== -1 || h.indexOf("HASH") !== -1) colSenha = c + 1;
+    if (h.indexOf("PRIMEIRO") !== -1) colPrimeiro = c + 1;
   }
 
-  var values = sheet.getRange(2, 1, lastRow - 1, 4).getValues();
-  var novoHash = gerarHashSenha(novaSenha);
+  if (colEmail === -1) colEmail = 2; // Coluna B
+  if (colPerfil === -1) colPerfil = 5; // Coluna E
+  if (colSenha === -1) colSenha = 4; // Coluna D
+  if (colPrimeiro === -1 && headers.length >= 6) colPrimeiro = 6; // Coluna F
 
-  for (var i = 0; i < values.length; i++) {
-    var userEmail = String(values[i][1] || "").toLowerCase().trim();
-    if (userEmail === targetEmail.toLowerCase().trim()) {
-      sheet.getRange(i + 2, 4).setValue(novoHash);
-      var msgOk2 = "Senha do usuário " + targetEmail + " redefinida com sucesso pelo administrador!";
-      return { success: true, mensagem: msgOk2, message: msgOk2 };
+  // VERIFICAÇÃO DE AUTORIZAÇÃO DO ADMINISTRADOR SOLICITANTE
+  var cleanAdminEmail = String(adminEmail || "").toLowerCase().trim();
+  var isOwner = cleanAdminEmail === String(WFS_CONFIG.OWNER_EMAIL || "").toLowerCase().trim();
+  var isAdminAuthorized = isOwner;
+
+  if (lastRow >= 2 && !isAdminAuthorized) {
+    var numCols = Math.max(sheet.getLastColumn(), 7);
+    var checkValues = sheet.getRange(2, 1, lastRow - 1, numCols).getValues();
+    for (var k = 0; k < checkValues.length; k++) {
+      var uEmail = String(checkValues[k][colEmail - 1] || "").toLowerCase().trim();
+      if (uEmail === cleanAdminEmail) {
+        var uPerfil = String(checkValues[k][colPerfil - 1] || "").toUpperCase();
+        if (uPerfil.indexOf("ADMIN") !== -1 || uPerfil.indexOf("MASTER") !== -1 || uPerfil.indexOf("SUPERVISOR") !== -1) {
+          isAdminAuthorized = true;
+        }
+        break;
+      }
     }
   }
-  var errNotFound2 = "Usuário não encontrado para redefinição.";
-  return { success: false, erro: errNotFound2, error: errNotFound2, message: errNotFound2 };
+
+  if (!isAdminAuthorized) {
+    var errUnauth = "Não autorizado: Apenas administradores ou supervisores podem redefinir senhas de usuários.";
+    return { success: false, erro: errUnauth, error: errUnauth, message: errUnauth };
+  }
+
+  var novoHash = (novaSenha.length === 64 && /^[0-9a-fA-F]+$/.test(novaSenha)) ? novaSenha : gerarHashSenha(novaSenha);
+
+  if (lastRow >= 2) {
+    var numCols = Math.max(sheet.getLastColumn(), 7);
+    var values = sheet.getRange(2, 1, lastRow - 1, numCols).getValues();
+    for (var i = 0; i < values.length; i++) {
+      var userEmail = String(values[i][colEmail - 1] || "").toLowerCase().trim();
+      if (userEmail === targetEmail.toLowerCase().trim()) {
+        var rowNum = i + 2;
+        sheet.getRange(rowNum, colSenha).setValue(novoHash);
+        if (colPrimeiro !== -1) {
+          sheet.getRange(rowNum, colPrimeiro).setValue("SIM");
+        }
+        var msgOk2 = "Senha de " + targetEmail + " resetada para acesso temporário (linha " + rowNum + ")!";
+        return { success: true, mensagem: msgOk2, message: msgOk2, row: rowNum };
+      }
+    }
+  }
+
+  // Se não existia, cria com PRIMEIRO_ACESSO = SIM
+  var novaLinha = [
+    targetEmail.split("@")[0],
+    targetEmail.toLowerCase().trim(),
+    "Operações GSE",
+    novoHash,
+    "OPERADOR",
+    "SIM",
+    "SIM"
+  ];
+  sheet.appendRow(novaLinha);
+  var appendRow = sheet.getLastRow();
+  var msgAppend2 = "Usuário " + targetEmail + " cadastrado com reset de senha temporária!";
+  return { success: true, mensagem: msgAppend2, message: msgAppend2, row: appendRow };
+}
+
+function cadastrarUsuarioPlanilha(payload) {
+  try {
+    if (!payload.email) {
+      return { success: false, erro: "E-mail é obrigatório." };
+    }
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheet = ss.getSheetByName("Usuários") || ss.getSheetByName("Usuarios") || ss.getSheetByName(WFS_CONFIG.USERS_SHEET_NAME) || configurarAbaUsuarios();
+    
+    var emailLimpo = String(payload.email || "").toLowerCase().trim();
+    var lastRow = sheet.getLastRow();
+    
+    if (lastRow >= 2) {
+      var values = sheet.getRange(2, 1, lastRow - 1, 2).getValues();
+      for (var i = 0; i < values.length; i++) {
+        if (String(values[i][1] || "").toLowerCase().trim() === emailLimpo) {
+          return { success: true, mensagem: "Usuário já existe na planilha.", row: i + 2 };
+        }
+      }
+    }
+
+    var hash = payload.passwordHash || (payload.password ? gerarHashSenha(payload.password) : gerarHashSenha("123456"));
+    var novaLinha = [
+      payload.name || emailLimpo.split("@")[0],
+      emailLimpo,
+      payload.cargo || payload.section || "Operações GSE",
+      hash,
+      (payload.perfil || "OPERADOR").toUpperCase(),
+      payload.primeiroAcesso || "SIM",
+      payload.ativo || "SIM"
+    ];
+    sheet.appendRow(novaLinha);
+    var rowInserida = sheet.getLastRow();
+    return {
+      success: true,
+      mensagem: "Usuário " + emailLimpo + " salvo com sucesso na aba Usuários!",
+      row: rowInserida
+    };
+  } catch (err) {
+    return { success: false, erro: err.toString() };
+  }
 }
 
 /**

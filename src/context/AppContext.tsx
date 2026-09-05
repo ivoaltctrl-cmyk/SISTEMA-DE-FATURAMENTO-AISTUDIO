@@ -81,13 +81,13 @@ interface AppContextType {
     email: string,
     currentPassword: string,
     newPassword: string
-  ) => Promise<{ success: boolean; message: string; user?: AppUser }>;
+  ) => Promise<{ success: boolean; message: string; user?: AppUser; persistedInSheet?: boolean }>;
   resetUserPasswordByAdmin: (
     adminEmail: string,
     adminPassword: string,
     targetUserId: string,
     newTemporaryPassword?: string
-  ) => Promise<{ success: boolean; message: string; temporaryPassword?: string }>;
+  ) => Promise<{ success: boolean; message: string; temporaryPassword?: string; persistedInSheet?: boolean }>;
   logoutUser: () => void;
   
   // OS Actions
@@ -907,12 +907,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     email: string,
     currentPassword: string,
     newPassword: string
-  ): Promise<{ success: boolean; message: string; user?: AppUser }> => {
+  ): Promise<{ success: boolean; message: string; user?: AppUser; persistedInSheet?: boolean }> => {
     try {
+      const cfg = getSheetsConfig();
       const response = await fetch('/api/auth/change-password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, currentPassword, newPassword }),
+        body: JSON.stringify({
+          email,
+          currentPassword,
+          newPassword,
+          webhookUrl: cfg.webhookUrl || '',
+        }),
       });
       const data = await response.json();
       if (response.ok && data.success) {
@@ -920,7 +926,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           setCurrentUserState(data.user);
           setUsers((prev) => prev.map((u) => (u.id === data.user.id ? data.user : u)));
         }
-        return { success: true, message: data.message, user: data.user };
+        let msg = data.message;
+        if (data.persistedInSheet === false) {
+          msg = `Senha atualizada na sessão local, mas a sincronização permanente na planilha Google falhou (verifique a URL do Webhook nas Configurações).`;
+        }
+        return { success: true, message: msg, user: data.user, persistedInSheet: data.persistedInSheet };
       }
       return { success: false, message: data.message || 'Erro ao alterar senha.' };
     } catch (err: any) {
@@ -933,8 +943,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     adminPassword: string,
     targetUserId: string,
     newTemporaryPassword?: string
-  ): Promise<{ success: boolean; message: string; temporaryPassword?: string }> => {
+  ): Promise<{ success: boolean; message: string; temporaryPassword?: string; persistedInSheet?: boolean }> => {
     try {
+      const cfg = getSheetsConfig();
       const response = await fetch('/api/auth/reset-password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -943,6 +954,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           adminPassword: adminPassword || masterPassword,
           targetUserId,
           newTemporaryPassword: newTemporaryPassword || '123456',
+          webhookUrl: cfg.webhookUrl || '',
         }),
       });
       const data = await response.json();
@@ -950,10 +962,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (data.user) {
           setUsers((prev) => prev.map((u) => (u.id === data.user.id ? data.user : u)));
         }
+        let msg = data.message;
+        if (data.persistedInSheet === false) {
+          msg = `Senha temporária resetada na sessão local, mas a gravação na planilha Google falhou (verifique a URL do Webhook nas Configurações).`;
+        }
         return {
           success: true,
-          message: data.message,
+          message: msg,
           temporaryPassword: data.temporaryPassword,
+          persistedInSheet: data.persistedInSheet,
         };
       }
       return { success: false, message: data.message || 'Falha ao resetar senha.' };

@@ -34,24 +34,114 @@ const OFFICIAL_USERS_SHEET_URL = 'https://docs.google.com/spreadsheets/d/1qT1rXO
 const OFFICIAL_CONFIG_SHEET_URL = 'https://docs.google.com/spreadsheets/d/1qT1rXOefT2lWHh7Z7wcxXE3RnnfWPu1Qe0xyI2HI7hk/edit?gid=1998402971#gid=1998402971';
 
 // Cryptographic Password Hashing Utility
+// Raw SHA-256 matches Google Sheets / Apps Script standard (64 hex characters)
+const rawSha256 = (plain: string): string => {
+  if (!plain) return '';
+  return crypto.createHash('sha256').update(plain.trim()).digest('hex');
+};
+
 const SALT = '_WFS_GOVERNANCE_SALT_2026_';
 
-const hashPassword = (plain: string): string => {
+const saltedSha256 = (plain: string): string => {
   if (!plain) return '';
   return crypto.createHash('sha256').update(plain.trim() + SALT).digest('hex');
+};
+
+// Default hasher for passwords stored on server & sent to Google Sheets
+const hashPassword = (plain: string): string => {
+  return rawSha256(plain);
 };
 
 const verifyPassword = (plain: string, storedHashOrPlain: string): boolean => {
   if (!plain || !storedHashOrPlain) return false;
   const trimmed = plain.trim();
-  // Direct match if stored as initial plain text or if hashes match
-  if (storedHashOrPlain === trimmed) return true;
-  return hashPassword(trimmed) === storedHashOrPlain;
+  const stored = storedHashOrPlain.trim();
+  // 1. Direct match (plain text)
+  if (stored === trimmed) return true;
+  // 2. Standard SHA-256 (64 hex, matching Google Sheets Webhook.gs)
+  if (stored.toLowerCase() === rawSha256(trimmed)) return true;
+  // 3. Salted SHA-256 (legacy compatibility)
+  if (stored.toLowerCase() === saltedSha256(trimmed)) return true;
+  return false;
 };
+
+// Shared secret between Node.js backend and Google Apps Script Webhook.gs
+// Configured via process.env.WFS_API_SECRET. If not defined, generates a dynamic cryptographically secure 256-bit token for the server session to prevent any burned static fallback.
+const hasEnvSecret = Boolean(process.env.WFS_API_SECRET && process.env.WFS_API_SECRET.trim().length > 0);
+const WFS_API_SECRET = hasEnvSecret
+  ? process.env.WFS_API_SECRET!.trim()
+  : crypto.randomBytes(32).toString('hex');
+
+if (!hasEnvSecret) {
+  console.warn(
+    '[SECURITY AVISO OPERACIONAL] Variável WFS_API_SECRET não definida no ambiente! Um segredo efêmero aleatório de 256 bits foi gerado para esta sessão. ATENÇÃO: Após qualquer reinício do processo Node.js, este token mudará e o Google Apps Script retornará "Acesso negado" caso a Script Property API_SECRET não seja atualizada. Para operação contínua em produção, configure WFS_API_SECRET fixa no painel de Secrets / Variáveis de Ambiente!'
+  );
+} else {
+  console.log('[SECURITY] WFS_API_SECRET persistente carregada com sucesso a partir das variáveis de ambiente.');
+}
 
 // In-Memory Server State (Synchronized across all browser clients)
 let isMaintenanceMode = false;
-let masterPasswordHash = hashPassword(RAW_MASTER_PASSWORD);
+let masterPasswordHash = rawSha256(RAW_MASTER_PASSWORD);
+let masterPasswordChanged = false;
+let globalWebhookUrl = process.env.GOOGLE_WEBHOOK_URL || '';
+
+// Helper to send events directly to Google Apps Script Webhook
+async function sendToGoogleAppsScriptWebhook(
+  payload: Record<string, any>,
+  explicitWebhookUrl?: string
+): Promise<{ success: boolean; data?: any; error?: string }> {
+  const targetUrl =
+    explicitWebhookUrl && typeof explicitWebhookUrl === 'string' && explicitWebhookUrl.startsWith('http')
+      ? explicitWebhookUrl
+      : globalWebhookUrl && globalWebhookUrl.startsWith('http')
+      ? globalWebhookUrl
+      : process.env.GOOGLE_WEBHOOK_URL;
+
+  if (!targetUrl) {
+    console.warn('[WEBHOOK-SYNC] Webhook URL do Google Apps Script não configurada.');
+    return { success: false, error: 'Webhook URL não configurada' };
+  }
+
+  // Cache for future requests
+  if (!globalWebhookUrl && targetUrl) {
+    globalWebhookUrl = targetUrl;
+  }
+
+  try {
+    const ctrl = new AbortController();
+    const timeout = setTimeout(() => ctrl.abort(), 25000);
+    const payloadWithAuth = {
+      ...payload,
+      apiSecret: WFS_API_SECRET,
+      apiToken: WFS_API_SECRET,
+    };
+    const res = await fetch(targetUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify(payloadWithAuth),
+      signal: ctrl.signal,
+    });
+    clearTimeout(timeout);
+
+    const data = (await res.json().catch(() => null)) as any;
+    if (res.ok && data && (data.success || data.mensagem || data.message)) {
+      console.log(`[WEBHOOK-SYNC] Sucesso na ação '${payload.action}':`, data.mensagem || data.message);
+      return { success: true, data };
+    }
+    const errMsg = data?.erro || data?.error || `HTTP ${res.status}`;
+    console.warn(`[WEBHOOK-SYNC] Webhook retornou erro na ação '${payload.action}':`, errMsg);
+    if (String(errMsg).toLowerCase().includes('acesso negado') || String(errMsg).toLowerCase().includes('token')) {
+      console.error(
+        '[SECURITY ALERTA DE CONFIGURAÇÃO] O Google Apps Script recusou a autenticação da ação! Certifique-se de que a variável de ambiente WFS_API_SECRET no servidor seja idêntica à Script Property API_SECRET no Google Apps Script.'
+      );
+    }
+    return { success: false, error: errMsg };
+  } catch (err: any) {
+    console.error(`[WEBHOOK-SYNC] Falha de comunicação na ação '${payload.action}':`, err.message || err);
+    return { success: false, error: err.message || 'Falha de rede' };
+  }
+}
 
 // Server-Sent Events (SSE) active client pool for instant cross-browser updates
 const sseClients: Response[] = [];
@@ -324,7 +414,7 @@ const OCR_SCHEMA = {
    ========================================================================= */
 
 // 1. Corporate / Master Login
-app.post('/api/auth/login', (req: Request, res: Response) => {
+app.post('/api/auth/login', async (req: Request, res: Response) => {
   try {
     const { email, password, requiredArea } = req.body;
     const clientIp = req.ip || req.socket.remoteAddress || 'client';
@@ -347,14 +437,19 @@ app.post('/api/auth/login', (req: Request, res: Response) => {
       });
     }
 
-    // Check if master email login
+    // Ensure users are loaded from spreadsheet if not done yet
+    if (serverUsers.length <= 1) {
+      await syncUsersFromSpreadsheet();
+    }
+
+    // Check if user exists
     let user = serverUsers.find(
       (u) =>
         u.email.toLowerCase().trim() === cleanEmail ||
         u.name.toLowerCase().trim() === cleanEmail
     );
 
-    // If master admin email not found in array, initialize or update it
+    // If master admin email not found in array, initialize it
     if (!user && cleanEmail === MASTER_EMAIL) {
       user = {
         id: 'usr-master-ivo',
@@ -397,9 +492,11 @@ app.post('/api/auth/login', (req: Request, res: Response) => {
     }
 
     // Validate password using secure comparison
+    // If master hasn't changed password yet, initial RAW_MASTER_PASSWORD works.
+    // Once changed, ONLY the new password (user.password) is valid!
     const isPasswordValid =
       verifyPassword(cleanPassword, user.password) ||
-      (cleanEmail === MASTER_EMAIL && (cleanPassword === RAW_MASTER_PASSWORD || verifyPassword(cleanPassword, masterPasswordHash)));
+      (!masterPasswordChanged && cleanEmail === MASTER_EMAIL && cleanPassword === RAW_MASTER_PASSWORD);
 
     if (!isPasswordValid) {
       registerFailedAttempt(rateKey);
@@ -464,12 +561,16 @@ app.post('/api/auth/login', (req: Request, res: Response) => {
   }
 });
 
-// 2. User Changes Own Password (First Access or Self Service)
-app.post('/api/auth/change-password', (req: Request, res: Response) => {
+// 2. User Changes Own Password (First Access or Self Service) - Persists to Google Sheets
+app.post('/api/auth/change-password', async (req: Request, res: Response) => {
   try {
-    const { email, currentPassword, newPassword } = req.body;
+    const { email, currentPassword, newPassword, webhookUrl } = req.body;
     const cleanEmail = (email || '').trim().toLowerCase();
     const cleanNewPass = (newPassword || '').trim();
+
+    if (webhookUrl && typeof webhookUrl === 'string' && webhookUrl.startsWith('http')) {
+      globalWebhookUrl = webhookUrl;
+    }
 
     if (!cleanEmail || !cleanNewPass) {
       return res.status(400).json({
@@ -485,7 +586,37 @@ app.post('/api/auth/change-password', (req: Request, res: Response) => {
       });
     }
 
-    const user = serverUsers.find((u) => u.email.toLowerCase().trim() === cleanEmail);
+    if (serverUsers.length <= 1) {
+      await syncUsersFromSpreadsheet();
+    }
+
+    let user = serverUsers.find((u) => u.email.toLowerCase().trim() === cleanEmail);
+    if (!user && cleanEmail === MASTER_EMAIL) {
+      user = {
+        id: 'usr-master-ivo',
+        name: 'Ivo (Master Administrador)',
+        email: MASTER_EMAIL,
+        section: 'Diretoria & Governança',
+        roleTitle: 'Administrador Geral & Mestre',
+        department: 'Governança & TI',
+        password: masterPasswordHash,
+        privilege: 'administrador',
+        privilegeLabel: 'Administrador Master Geral',
+        role: 'master_ti',
+        roleLabel: 'Administrador Geral',
+        canValidateBilling: true,
+        canDeleteOS: true,
+        canAccessExecutive: true,
+        canAccessSettings: true,
+        mustChangePassword: false,
+        firstAccess: false,
+        active: true,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        avatarColor: 'bg-slate-900',
+      };
+      serverUsers.unshift(user);
+    }
+
     if (!user) {
       return res.status(404).json({ success: false, message: 'Usuário não encontrado.' });
     }
@@ -498,12 +629,14 @@ app.post('/api/auth/change-password', (req: Request, res: Response) => {
     }
 
     // Update password in server state with SHA-256 hash
-    user.password = hashPassword(cleanNewPass);
+    const newHash = rawSha256(cleanNewPass);
+    user.password = newHash;
     user.mustChangePassword = false;
     user.firstAccess = false;
 
     if (user.email.toLowerCase() === MASTER_EMAIL) {
-      masterPasswordHash = hashPassword(cleanNewPass);
+      masterPasswordHash = newHash;
+      masterPasswordChanged = true;
     }
 
     broadcastSystemEvent({
@@ -512,29 +645,60 @@ app.post('/api/auth/change-password', (req: Request, res: Response) => {
       timestamp: new Date().toISOString(),
     });
 
-    console.log(`[AUTH] Senha alterada e criptografada com sucesso para usuário: ${user.email}`);
+    console.log(`[AUTH] Senha alterada com sucesso no Node para usuário: ${user.email}`);
+
+    // PERSISTENCE TO GOOGLE SHEETS VIA WEBHOOK.GS
+    let sheetPersisted = false;
+    let sheetMessage = '';
+    try {
+      const webhookPayload = {
+        action: 'user_change_password',
+        email: cleanEmail,
+        currentPassword: currentPassword || '',
+        newPassword: cleanNewPass,
+        passwordHash: newHash,
+      };
+      const whRes = await sendToGoogleAppsScriptWebhook(webhookPayload, webhookUrl);
+      if (whRes.success) {
+        sheetPersisted = true;
+        sheetMessage = ' e sincronizada na planilha Google (aba Usuários)';
+        console.log(`[AUTH] Senha gravada com sucesso na planilha Google para ${cleanEmail}`);
+      }
+    } catch (whErr: any) {
+      console.warn('[AUTH] Falha ao persistir senha na planilha via Webhook:', whErr);
+    }
 
     return res.status(200).json({
       success: true,
-      message: 'Senha atualizada com sucesso! Você já pode utilizar o sistema com sua nova senha.',
+      message: `Senha atualizada com sucesso${sheetMessage}! Você já pode utilizar o sistema com sua nova senha.`,
       user: sanitizeUser(user),
+      persistedInSheet: sheetPersisted,
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err.message });
   }
 });
 
-// 3. Admin Resets User Password (with Forced First Access)
-app.post('/api/auth/reset-password', (req: Request, res: Response) => {
+// 3. Admin Resets User Password (with Forced First Access) - Persists to Google Sheets
+app.post('/api/auth/reset-password', async (req: Request, res: Response) => {
   try {
-    const { adminEmail, adminPassword, targetUserId, newTemporaryPassword } = req.body;
+    const { adminEmail, adminPassword, targetUserId, newTemporaryPassword, webhookUrl } = req.body;
     const cleanAdminEmail = (adminEmail || '').trim().toLowerCase();
 
-    // Authenticate Administrator
+    if (webhookUrl && typeof webhookUrl === 'string' && webhookUrl.startsWith('http')) {
+      globalWebhookUrl = webhookUrl;
+    }
+
+    if (serverUsers.length <= 1) {
+      await syncUsersFromSpreadsheet();
+    }
+
+    // Authenticate Administrator securely (no unconditional backdoor)
     const adminUser = serverUsers.find((u) => u.email.toLowerCase().trim() === cleanAdminEmail);
     const isMaster =
       cleanAdminEmail === MASTER_EMAIL &&
-      (adminPassword === RAW_MASTER_PASSWORD || verifyPassword(adminPassword, masterPasswordHash) || adminPassword === 'admin');
+      (verifyPassword(adminPassword || '', masterPasswordHash) ||
+        (!masterPasswordChanged && adminPassword === RAW_MASTER_PASSWORD));
     const isAdmin =
       adminUser &&
       (adminUser.privilege === 'administrador' || adminUser.privilege === 'master_ti') &&
@@ -547,14 +711,17 @@ app.post('/api/auth/reset-password', (req: Request, res: Response) => {
       });
     }
 
-    const targetUser = serverUsers.find((u) => u.id === targetUserId);
+    const targetUser = serverUsers.find(
+      (u) => u.id === targetUserId || u.email.toLowerCase().trim() === String(targetUserId).toLowerCase().trim()
+    );
     if (!targetUser) {
       return res.status(404).json({ success: false, message: 'Usuário de destino não encontrado.' });
     }
 
     // Define temporary password and hash it
     const tempPassword = (newTemporaryPassword || '123456').trim();
-    targetUser.password = hashPassword(tempPassword);
+    const tempHash = rawSha256(tempPassword);
+    targetUser.password = tempHash;
     targetUser.mustChangePassword = true;
     targetUser.firstAccess = true;
 
@@ -566,11 +733,33 @@ app.post('/api/auth/reset-password', (req: Request, res: Response) => {
 
     console.log(`[AUTH] Reset de senha realizado pelo Administrador ${cleanAdminEmail} para o usuário: ${targetUser.email}`);
 
+    // PERSISTENCE TO GOOGLE SHEETS VIA WEBHOOK.GS
+    let sheetPersisted = false;
+    let sheetMessage = '';
+    try {
+      const webhookPayload = {
+        action: 'admin_reset_user_password',
+        adminEmail: cleanAdminEmail,
+        targetEmail: targetUser.email,
+        newPassword: tempPassword,
+        passwordHash: tempHash,
+      };
+      const whRes = await sendToGoogleAppsScriptWebhook(webhookPayload, webhookUrl);
+      if (whRes.success) {
+        sheetPersisted = true;
+        sheetMessage = ' e atualizada na planilha Google (aba Usuários)';
+        console.log(`[AUTH] Reset de senha gravado na planilha Google para ${targetUser.email}`);
+      }
+    } catch (whErr: any) {
+      console.warn('[AUTH] Falha ao persistir reset na planilha via Webhook:', whErr);
+    }
+
     return res.status(200).json({
       success: true,
-      message: `Senha de ${targetUser.name} resetada com sucesso para "${tempPassword}". O usuário será obrigado a cadastrar sua própria senha no próximo login.`,
+      message: `Senha de ${targetUser.name} resetada com sucesso para "${tempPassword}"${sheetMessage}. O usuário será obrigado a cadastrar sua própria senha no próximo login.`,
       temporaryPassword: tempPassword,
       user: sanitizeUser(targetUser),
+      persistedInSheet: sheetPersisted,
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err.message });
@@ -622,20 +811,39 @@ function parseUsersFromCsv(text: string): ServerUser[] {
   }
   if (headerIdx === -1) headerIdx = 0;
 
+  // Dynamic header column mapping (aligning with Google Apps Script logic)
+  const headerRow = (parsedRows[headerIdx] || []).map((h) => h.toUpperCase().trim());
+  let colNome = headerRow.findIndex((h) => h.includes('NOME'));
+  let colEmail = headerRow.findIndex((h) => h.includes('EMAIL') || h.includes('E-MAIL'));
+  let colCargo = headerRow.findIndex((h) => h.includes('CARGO') || h.includes('SETOR') || h.includes('FUNÇÃO') || h.includes('FUNCAO'));
+  let colSenha = headerRow.findIndex((h) => h.includes('SENHA') || h.includes('HASH'));
+  let colPerfil = headerRow.findIndex((h) => h.includes('PERFIL') || h.includes('PRIVIL'));
+  let colPrimeiro = headerRow.findIndex((h) => h.includes('PRIMEIRO'));
+  let colAtivo = headerRow.findIndex((h) => h.includes('ATIVO') || h.includes('STATUS'));
+
+  // Tolerant fallbacks if headers weren't found by text
+  if (colNome === -1) colNome = 0;
+  if (colEmail === -1) colEmail = 1;
+  if (colCargo === -1) colCargo = 2;
+  if (colSenha === -1) colSenha = 3;
+  if (colPerfil === -1) colPerfil = 4;
+  if (colPrimeiro === -1 && headerRow.length >= 6) colPrimeiro = 5;
+  if (colAtivo === -1 && headerRow.length >= 7) colAtivo = 6;
+
   const dataRows = parsedRows.slice(headerIdx + 1);
   const users: ServerUser[] = [];
 
   dataRows.forEach((r, idx) => {
     if (!r || r.length < 2) return;
-    const name = r[0]?.trim();
-    const email = r[1]?.trim();
+    const name = (colNome !== -1 ? r[colNome]?.trim() : '') || '';
+    const email = (colEmail !== -1 ? r[colEmail]?.trim() : '') || '';
     if (!name || !email || email.includes('@example.com')) return;
 
-    const cargo = r[2]?.trim() || 'Operações GSE';
-    const rawPass = r[3]?.trim() || '123';
-    const perfilRaw = (r[4]?.trim() || 'OPERADOR').toUpperCase();
-    const primeiroRaw = (r[5]?.trim() || '').toUpperCase();
-    const ativoRaw = (r[6]?.trim() || 'SIM').toUpperCase();
+    const cargo = (colCargo !== -1 ? r[colCargo]?.trim() : '') || 'Operações GSE';
+    const rawPass = (colSenha !== -1 ? r[colSenha]?.trim() : '') || '';
+    const perfilRaw = (colPerfil !== -1 ? (r[colPerfil]?.trim() || 'OPERADOR') : 'OPERADOR').toUpperCase();
+    const primeiroRaw = (colPrimeiro !== -1 ? (r[colPrimeiro]?.trim() || '') : '').toUpperCase();
+    const ativoRaw = (colAtivo !== -1 ? (r[colAtivo]?.trim() || 'SIM') : 'SIM').toUpperCase();
 
     let privilege: ServerUser['privilege'] = 'operador';
     if (perfilRaw.includes('ADMIN') || perfilRaw.includes('MASTER')) {
@@ -648,6 +856,25 @@ function parseUsersFromCsv(text: string): ServerUser[] {
 
     const isMaster = email.toLowerCase() === MASTER_EMAIL;
 
+    // Resolve password: keep raw 64-char hex hash intact, hash plain text, or fallback
+    let resolvedPassword = '';
+    if (rawPass && rawPass.length === 64 && /^[0-9a-fA-F]+$/.test(rawPass)) {
+      resolvedPassword = rawPass.toLowerCase();
+    } else if (rawPass) {
+      resolvedPassword = rawSha256(rawPass);
+    } else if (isMaster) {
+      resolvedPassword = masterPasswordHash;
+    } else {
+      resolvedPassword = rawSha256('123456');
+    }
+
+    if (isMaster && resolvedPassword) {
+      masterPasswordHash = resolvedPassword;
+      if (resolvedPassword !== rawSha256(RAW_MASTER_PASSWORD)) {
+        masterPasswordChanged = true;
+      }
+    }
+
     const user: ServerUser = {
       id: isMaster ? 'usr-master-ivo' : `usr-sheet-${idx + 1}`,
       name,
@@ -655,7 +882,7 @@ function parseUsersFromCsv(text: string): ServerUser[] {
       section: cargo,
       roleTitle: cargo,
       department: cargo,
-      password: isMaster ? masterPasswordHash : hashPassword(rawPass),
+      password: resolvedPassword,
       privilege,
       privilegeLabel: isMaster
         ? 'Administrador Master Geral'
@@ -684,41 +911,64 @@ function parseUsersFromCsv(text: string): ServerUser[] {
 }
 
 async function fetchAndParseSpreadsheetUsers(): Promise<ServerUser[]> {
+  const sheetId = '1qT1rXOefT2lWHh7Z7wcxXE3RnnfWPu1Qe0xyI2HI7hk';
+  const candidateUrls = [
+    `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&gid=2018208122`,
+    `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent('Usuários')}`,
+    `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent('Usuarios')}`,
+  ];
+
+  for (const url of candidateUrls) {
+    try {
+      const response = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+      if (!response.ok) continue;
+      const csv = await response.text();
+      if (!csv || csv.includes('<html') || csv.includes('accounts.google.com')) continue;
+      const parsed = parseUsersFromCsv(csv);
+      if (parsed.length > 0) {
+        return parsed;
+      }
+    } catch (err: any) {
+      // try next candidate
+    }
+  }
+  return [];
+}
+
+async function syncUsersFromSpreadsheet(): Promise<void> {
   try {
-    const sheetId = '1qT1rXOefT2lWHh7Z7wcxXE3RnnfWPu1Qe0xyI2HI7hk';
-    const gid = '2018208122';
-    const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&gid=${gid}`;
-    const response = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-    if (!response.ok) return [];
-    const csv = await response.text();
-    if (!csv || csv.includes('<html') || csv.includes('accounts.google.com')) return [];
-    return parseUsersFromCsv(csv);
+    const sheetUsers = await fetchAndParseSpreadsheetUsers();
+    if (sheetUsers.length > 0) {
+      const map = new Map<string, ServerUser>();
+      serverUsers.forEach((u) => map.set(u.email.toLowerCase(), u));
+      sheetUsers.forEach((u) => {
+        const key = u.email.toLowerCase();
+        const existing = map.get(key);
+        if (existing) {
+          map.set(key, {
+            ...existing,
+            ...u,
+            password: u.password || existing.password,
+            mustChangePassword: u.mustChangePassword,
+            firstAccess: u.firstAccess,
+            active: u.active,
+          });
+        } else {
+          map.set(key, u);
+        }
+      });
+      serverUsers = Array.from(map.values());
+      console.log(`[AUTH-SYNC] ${serverUsers.length} usuários sincronizados com a planilha Google.`);
+    }
   } catch (err: any) {
-    console.warn('Erro ao buscar usuários da planilha no backend:', err);
-    return [];
+    console.warn('[AUTH-SYNC] Aviso ao sincronizar usuários com a planilha:', err.message || err);
   }
 }
 
 // Get All Users (Sanitized, Synced with Sheets)
 app.get('/api/users', async (_req: Request, res: Response) => {
   if (serverUsers.length <= 1) {
-    try {
-      const sheetUsers = await fetchAndParseSpreadsheetUsers();
-      if (sheetUsers.length > 0) {
-        const map = new Map<string, ServerUser>();
-        serverUsers.forEach((u) => map.set(u.email.toLowerCase(), u));
-        sheetUsers.forEach((u) => {
-          const key = u.email.toLowerCase();
-          const existing = map.get(key);
-          if (existing) {
-            map.set(key, { ...existing, ...u, password: existing.password || u.password });
-          } else {
-            map.set(key, u);
-          }
-        });
-        serverUsers = Array.from(map.values());
-      }
-    } catch {}
+    await syncUsersFromSpreadsheet();
   }
   const sanitized = serverUsers.map(sanitizeUser);
   return res.status(200).json({ success: true, users: sanitized });
@@ -783,6 +1033,20 @@ app.post('/api/users', (req: Request, res: Response) => {
       users: serverUsers.map(sanitizeUser),
       timestamp: new Date().toISOString(),
     });
+
+    // Asynchronously persist new user to Google Sheets via Webhook.gs
+    const webhookPayload = {
+      action: 'create_user',
+      name: newUser.name,
+      email: newUser.email,
+      cargo: newUser.section || newUser.roleTitle,
+      perfil: newUser.privilege.toUpperCase(),
+      passwordHash: newUser.password,
+      primeiroAcesso: 'SIM',
+      ativo: 'SIM',
+    };
+    sendToGoogleAppsScriptWebhook(webhookPayload, req.body.webhookUrl).catch(() => {});
+
     return res.status(201).json({
       success: true,
       message: 'Usuário cadastrado com sucesso. No primeiro acesso, ele definirá sua senha pessoal.',
@@ -1022,9 +1286,9 @@ app.get('/api/system/events', (req: Request, res: Response) => {
 });
 
 // Toggle Maintenance Mode (Tira o app do ar ou reativa online em todos os navegadores)
-app.post('/api/system/maintenance', (req: Request, res: Response) => {
+app.post('/api/system/maintenance', async (req: Request, res: Response) => {
   try {
-    const { active, status, adminEmail, adminPassword } = req.body;
+    const { active, status, adminEmail, adminPassword, webhookUrl } = req.body;
     const cleanAdminEmail = (adminEmail || '').trim().toLowerCase();
 
     // Determine state from active or status
@@ -1041,6 +1305,23 @@ app.post('/api/system/maintenance', (req: Request, res: Response) => {
       updatedBy: cleanAdminEmail || 'Master Admin',
       timestamp: new Date().toISOString(),
     });
+
+    // Synchronize to Google Apps Script Webhook securely via server-side (injecting WFS_API_SECRET)
+    const targetWebhook = (webhookUrl && typeof webhookUrl === 'string' && webhookUrl.startsWith('http'))
+      ? webhookUrl
+      : globalWebhookUrl || process.env.GOOGLE_WEBHOOK_URL;
+
+    if (targetWebhook) {
+      sendToGoogleAppsScriptWebhook({
+        action: 'update_system_status',
+        status: isMaintenanceMode ? 'FECHADO' : 'ABERTO',
+        isMaintenanceMode,
+        sheetName: 'Status',
+        updatedBy: cleanAdminEmail || 'Master Admin',
+      }, targetWebhook).catch((err) => {
+        console.warn('[MAINTENANCE-SYNC] Aviso ao atualizar webhook GAS:', err);
+      });
+    }
 
     return res.status(200).json({
       success: true,
@@ -1428,6 +1709,8 @@ app.post('/api/drive/upload-canhoto', async (req: Request, res: Response) => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             action: 'upload_drive_canhoto',
+            apiSecret: WFS_API_SECRET,
+            apiToken: WFS_API_SECRET,
             driveFolderId: targetFolderId,
             fileName: targetFileName,
             imageBase64: imageBase64,
@@ -1617,6 +1900,49 @@ app.post('/api/sheets/fetch', async (req: Request, res: Response) => {
   }
 });
 
+// Proxy endpoint to notify Google Apps Script Webhook about order status change (with WFS_API_SECRET)
+app.post('/api/sheets/notify-order-status', async (req: Request, res: Response) => {
+  try {
+    const { order, webhookUrl } = req.body || {};
+    if (!order || !order.osNumber) {
+      return res.status(400).json({ success: false, message: 'Dados da ordem ausentes.' });
+    }
+    const result = await sendToGoogleAppsScriptWebhook({
+      action: 'update_order_status',
+      osNumber: order.osNumber,
+      status: order.status,
+      invoiceNumber: order.invoiceNumber || '-',
+      clientName: order.clientName || '',
+      serviceTitle: order.serviceTitle || '',
+      updatedAt: new Date().toISOString(),
+    }, webhookUrl);
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Proxy endpoint to sync all orders to Google Apps Script Webhook (with WFS_API_SECRET)
+app.post('/api/sheets/sync-orders', async (req: Request, res: Response) => {
+  try {
+    const { rows, ordersCount, webhookUrl } = req.body || {};
+    const result = await sendToGoogleAppsScriptWebhook({
+      action: 'sync_all_orders',
+      timestamp: new Date().toISOString(),
+      ordersCount: ordersCount || (Array.isArray(rows) ? rows.length : 0),
+      data: rows || [],
+    }, webhookUrl);
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Fallback 404 handler for unknown /api routes
+app.all('/api/*', (_req: Request, res: Response) => {
+  return res.status(404).json({ success: false, error: 'Endpoint da API não encontrado.' });
+});
+
 async function startServer() {
   // Vite middleware for development
   if (process.env.NODE_ENV !== 'production') {
@@ -1640,6 +1966,11 @@ async function startServer() {
     console.log(`[CONFIG] Master Admin: ${MASTER_EMAIL} (Senha inicial: admin)`);
     console.log(`[CONFIG] Google Drive Folder ID: ${DRIVE_FOLDER_ID}`);
     console.log(`[CONFIG] Sheet Fotos_SO vinculada`);
+
+    // Proactively preload and synchronize users and password hashes from Google Sheets
+    syncUsersFromSpreadsheet().catch((e) => {
+      console.warn('[CONFIG] Aviso ao inicializar usuários da planilha:', e);
+    });
   });
 }
 

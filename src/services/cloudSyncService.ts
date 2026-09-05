@@ -292,8 +292,9 @@ export const publishGlobalSystemState = async (
     }).catch(() => {});
   } catch {}
 
-  // 5. Post to Express Server (/api/system/maintenance)
+  // 5. Post to Express Server (/api/system/maintenance) which securely forwards to Google Apps Script Webhook
   try {
+    const cfg = getSheetsConfig();
     fetch('/api/system/maintenance', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -302,28 +303,9 @@ export const publishGlobalSystemState = async (
         active: isClosed,
         adminEmail: 'ivoaltctrl@gmail.com',
         adminPassword: adminPassword || 'admin',
+        webhookUrl: cfg.webhookUrl || '',
       }),
     }).catch(() => {});
-  } catch {}
-
-  // 6. Post to Google Sheets Webhook with full payload if configured
-  try {
-    const cfg = getSheetsConfig();
-    if (cfg.webhookUrl && cfg.webhookUrl.startsWith('http')) {
-      fetch(cfg.webhookUrl, {
-        method: 'POST',
-        mode: 'no-cors',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'sync_system_state',
-          status: resolvedStatus,
-          isMaintenanceMode: isClosed,
-          users: cachedCloudState.users,
-          updatedBy: 'ivoaltctrl@gmail.com',
-          timestamp: new Date().toISOString(),
-        }),
-      }).catch(() => {});
-    }
   } catch {}
 
   return true;

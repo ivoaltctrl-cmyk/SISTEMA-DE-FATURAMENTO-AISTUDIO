@@ -256,9 +256,12 @@ export const UsersManager: React.FC = () => {
 
       setIsResetting(false);
       if (res.success) {
+        const warningSuffix = res.persistedInSheet === false
+          ? ' (Aviso: Senha redefinida na sessão atual, mas a sincronização permanente com o Google Sheets falhou. Verifique a URL do Webhook nas Configurações).'
+          : ' e sincronizada permanentemente na aba Usuários da planilha Google.';
         setFeedback({
-          type: 'success',
-          text: `Senha de ${resetModalUser.name} resetada com sucesso para "${res.temporaryPassword || temporaryPassword}". O usuário será obrigado a cadastrar uma nova senha no próximo login.`,
+          type: res.persistedInSheet === false ? 'info' : 'success',
+          text: `Senha de ${resetModalUser.name} resetada com sucesso para "${res.temporaryPassword || temporaryPassword}"${warningSuffix} O usuário será obrigado a cadastrar uma nova senha no próximo login.`,
         });
         setResetModalUser(null);
       } else {
