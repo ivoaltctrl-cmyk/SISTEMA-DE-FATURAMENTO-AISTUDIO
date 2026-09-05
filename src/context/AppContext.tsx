@@ -23,6 +23,8 @@ import {
   parseCSVToRows,
   parseSheetRowsToOrders,
   saveSheetsConfig,
+  saveSheetsConfigLocally,
+  syncSheetsConfigFromServer,
   syncOrdersWithGoogleSheets,
   pushSingleOrderToGoogleSheet,
   notifySheetOrderUpdate,
@@ -493,6 +495,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     syncAllTiers();
     fetchServerData();
+    syncSheetsConfigFromServer().catch(() => {});
 
     // 2. Setup Server-Sent Events (SSE) for Instant (<50ms) push across different browsers/devices
     try {
@@ -511,6 +514,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
           if (data.type === 'USERS_CHANGE' && Array.isArray(data.users)) {
             setUsers(mergeWithMasterUser(data.users));
+          }
+
+          // Real-time synchronization of Google Sheets & Apps Script Webhook config across all PCs
+          if ((data.type === 'INIT' || data.type === 'CONFIG_CHANGE' || data.type === 'STATE_CHANGE') && data.sheetsConfig) {
+            const sc = data.sheetsConfig;
+            if (sc.webhookUrl && typeof sc.webhookUrl === 'string' && sc.webhookUrl.startsWith('http')) {
+              const current = getSheetsConfig();
+              if (current.webhookUrl !== sc.webhookUrl) {
+                saveSheetsConfigLocally({
+                  ...current,
+                  webhookUrl: sc.webhookUrl,
+                  sheetUrl: sc.sheetUrl || current.sheetUrl,
+                  sheetId: sc.sheetId || current.sheetId,
+                  driveFolderUrl: sc.driveFolderUrl || current.driveFolderUrl,
+                  driveFolderId: sc.driveFolderId || current.driveFolderId,
+                  photosSheetName: sc.photosSheetName || current.photosSheetName,
+                });
+              }
+            }
           }
 
           if (data.type === 'STATE_CHANGE' && data.appState) {
@@ -569,6 +591,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           } else if (ev.data?.type === 'LOCAL_INVOICES_UPDATE' && Array.isArray(ev.data.invoices)) {
             isRemoteInvoicesUpdateRef.current = true;
             setInvoices(ev.data.invoices);
+          } else if (ev.data?.type === 'SHEETS_CONFIG_UPDATE' && ev.data.config) {
+            saveSheetsConfigLocally(ev.data.config);
           }
         };
       }

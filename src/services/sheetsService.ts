@@ -192,43 +192,127 @@ export interface SheetsSyncConfig {
 
 const STORAGE_KEY = 'wfs_sheets_sync_config';
 
+let cachedSheetsConfig: SheetsSyncConfig | null = null;
+
+export const saveSheetsConfigLocally = (cfg: SheetsSyncConfig) => {
+  cachedSheetsConfig = cfg;
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+    }
+  } catch {}
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('wfs_sheets_config_changed', { detail: cfg }));
+  }
+};
+
 export const getSheetsConfig = (): SheetsSyncConfig => {
-  const saved = localStorage.getItem(STORAGE_KEY);
-  if (saved) {
-    try {
-      const parsed = JSON.parse(saved);
-      return {
-        ...parsed,
-        sheetUrl: parsed.sheetUrl || OFFICIAL_SHEET_URL,
-        sheetId: parsed.sheetId || OFFICIAL_SHEET_ID,
-        driveFolderUrl: parsed.driveFolderUrl || OFFICIAL_DRIVE_FOLDER_URL,
-        driveFolderId: parsed.driveFolderId || OFFICIAL_DRIVE_FOLDER_ID,
-        photosSheetName: parsed.photosSheetName || OFFICIAL_PHOTOS_SHEET_NAME,
-        ownerEmail: parsed.ownerEmail || 'ivoaltctrl@gmail.com',
-      };
-    } catch {
-      // fallback
+  let parsed: any = null;
+  if (typeof localStorage !== 'undefined') {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      try {
+        parsed = JSON.parse(saved);
+      } catch {}
     }
   }
-  return {
-    webhookUrl: '',
-    autoSync: true,
-    sheetId: OFFICIAL_SHEET_ID,
-    sheetUrl: OFFICIAL_SHEET_URL,
-    driveFolderUrl: OFFICIAL_DRIVE_FOLDER_URL,
-    driveFolderId: OFFICIAL_DRIVE_FOLDER_ID,
-    photosSheetName: OFFICIAL_PHOTOS_SHEET_NAME,
-    ownerEmail: 'ivoaltctrl@gmail.com',
-    lastSyncTime: undefined,
-    lastSyncStatus: 'idle',
-    lastSyncCount: 0,
-    syncHistory: [],
+
+  const base = parsed || cachedSheetsConfig || {};
+  const merged: SheetsSyncConfig = {
+    webhookUrl: base.webhookUrl || (cachedSheetsConfig ? cachedSheetsConfig.webhookUrl : '') || '',
+    autoSync: base.autoSync ?? true,
+    sheetId: base.sheetId || OFFICIAL_SHEET_ID,
+    sheetUrl: base.sheetUrl || OFFICIAL_SHEET_URL,
+    driveFolderUrl: base.driveFolderUrl || OFFICIAL_DRIVE_FOLDER_URL,
+    driveFolderId: base.driveFolderId || OFFICIAL_DRIVE_FOLDER_ID,
+    photosSheetName: base.photosSheetName || OFFICIAL_PHOTOS_SHEET_NAME,
+    ownerEmail: base.ownerEmail || 'ivoaltctrl@gmail.com',
+    lastSyncTime: base.lastSyncTime,
+    lastSyncStatus: base.lastSyncStatus || 'idle',
+    lastSyncCount: base.lastSyncCount || 0,
+    syncHistory: base.syncHistory || [],
   };
+
+  cachedSheetsConfig = merged;
+  return merged;
 };
 
 export const saveSheetsConfig = (cfg: SheetsSyncConfig) => {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+  saveSheetsConfigLocally(cfg);
+
+  // Broadcast to other tabs in the same browser
+  try {
+    if (typeof BroadcastChannel !== 'undefined') {
+      const bc = new BroadcastChannel('wfs_system_sync');
+      bc.postMessage({ type: 'SHEETS_CONFIG_UPDATE', config: cfg });
+      bc.close();
+    }
+  } catch {}
+
+  // Push to server so ALL other PCs and devices receive it instantly via SSE / GET /api/config/sheets
+  fetch('/api/config/sheets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(cfg),
+  }).catch((err) => {
+    console.warn('[SHEETS-SYNC] Falha ao propagar configuração de sheets ao backend:', err);
+  });
 };
+
+/**
+ * Synchronizes the Google Sheets and Webhook configuration from the central server.
+ * This guarantees that when one PC configures the Webhook URL or Drive Folder,
+ * all other computers fetch and activate it automatically without manual re-entry.
+ */
+export const syncSheetsConfigFromServer = async (): Promise<SheetsSyncConfig> => {
+  const localCfg = getSheetsConfig();
+
+  try {
+    const res = await fetch('/api/config/sheets', { cache: 'no-store' });
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.success && data.config) {
+        const srv = data.config;
+
+        // If server has a valid webhook URL, apply it locally
+        if (srv.webhookUrl && typeof srv.webhookUrl === 'string' && srv.webhookUrl.startsWith('http')) {
+          const merged: SheetsSyncConfig = {
+            ...localCfg,
+            webhookUrl: srv.webhookUrl,
+            sheetUrl: srv.sheetUrl || localCfg.sheetUrl,
+            sheetId: srv.sheetId || localCfg.sheetId,
+            driveFolderUrl: srv.driveFolderUrl || localCfg.driveFolderUrl,
+            driveFolderId: srv.driveFolderId || localCfg.driveFolderId,
+            photosSheetName: srv.photosSheetName || localCfg.photosSheetName,
+            ownerEmail: srv.ownerEmail || localCfg.ownerEmail,
+            autoSync: srv.autoSync !== undefined ? srv.autoSync : localCfg.autoSync,
+          };
+          saveSheetsConfigLocally(merged);
+          return merged;
+        } else if (localCfg.webhookUrl && localCfg.webhookUrl.startsWith('http')) {
+          // This local PC has the webhook configured, but the central server doesn't!
+          // Push it up immediately to seed the server and broadcast to all other PCs!
+          fetch('/api/config/sheets', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(localCfg),
+          }).catch(() => {});
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[SHEETS-SYNC] Falha ao consultar /api/config/sheets:', err);
+  }
+
+  return localCfg;
+};
+
+// Initial background sync attempt on client load
+if (typeof window !== 'undefined') {
+  setTimeout(() => {
+    syncSheetsConfigFromServer().catch(() => {});
+  }, 100);
+}
 
 // Upload or store digitized photo to Google Drive (DRIVE_FOLDER_ID: 1vDmx3GHFH_4FWfcNkPaOX7m3aH_yuFjD) and Fotos_SO sheet
 export interface GoogleDriveUploadResult {

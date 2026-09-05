@@ -1,5 +1,6 @@
 import express, { Request, Response } from 'express';
 import path from 'path';
+import fs from 'fs';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
 import { GoogleGenAI, Type } from '@google/genai';
@@ -86,6 +87,91 @@ let masterPasswordHash = rawSha256(RAW_MASTER_PASSWORD);
 let masterPasswordChanged = false;
 let globalWebhookUrl = process.env.GOOGLE_WEBHOOK_URL || '';
 
+const DATA_DIR = path.resolve(process.cwd(), 'data');
+const CONFIG_FILE_PATH = path.join(DATA_DIR, 'sheets_config.json');
+
+interface ServerSheetsConfig {
+  webhookUrl: string;
+  sheetUrl: string;
+  sheetId: string;
+  driveFolderUrl: string;
+  driveFolderId: string;
+  photosSheetName: string;
+  ownerEmail: string;
+  autoSync: boolean;
+  updatedAt?: string;
+  updatedBy?: string;
+}
+
+let globalSheetsConfig: ServerSheetsConfig = {
+  webhookUrl: process.env.GOOGLE_WEBHOOK_URL || '',
+  sheetUrl: OFFICIAL_SHEET_URL,
+  sheetId: '1qT1rXOefT2lWHh7Z7wcxXE3RnnfWPu1Qe0xyI2HI7hk',
+  driveFolderUrl: 'https://drive.google.com/drive/folders/1vDmx3GHFH_4FWfcNkPaOX7m3aH_yuFjD',
+  driveFolderId: DRIVE_FOLDER_ID,
+  photosSheetName: PHOTOS_SHEET_NAME,
+  ownerEmail: 'ivoaltctrl@gmail.com',
+  autoSync: true,
+};
+
+function loadPersistentSheetsConfig() {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    if (fs.existsSync(CONFIG_FILE_PATH)) {
+      const raw = fs.readFileSync(CONFIG_FILE_PATH, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        globalSheetsConfig = {
+          ...globalSheetsConfig,
+          ...parsed,
+          sheetUrl: parsed.sheetUrl || OFFICIAL_SHEET_URL,
+          sheetId: parsed.sheetId || '1qT1rXOefT2lWHh7Z7wcxXE3RnnfWPu1Qe0xyI2HI7hk',
+          driveFolderUrl: parsed.driveFolderUrl || 'https://drive.google.com/drive/folders/1vDmx3GHFH_4FWfcNkPaOX7m3aH_yuFjD',
+          driveFolderId: parsed.driveFolderId || DRIVE_FOLDER_ID,
+          photosSheetName: parsed.photosSheetName || PHOTOS_SHEET_NAME,
+        };
+        if (parsed.webhookUrl && typeof parsed.webhookUrl === 'string' && parsed.webhookUrl.startsWith('http')) {
+          globalWebhookUrl = parsed.webhookUrl;
+        }
+        console.log('[CONFIG] Configuração do Google Sheets carregada do armazenamento em disco com sucesso.');
+        if (globalSheetsConfig.webhookUrl) {
+          console.log(`[CONFIG] Webhook URL ativa para todos os PCs: ${globalSheetsConfig.webhookUrl.slice(0, 50)}...`);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[CONFIG] Erro ao carregar sheets_config.json:', err);
+  }
+}
+
+function savePersistentSheetsConfig(newConfig: Partial<ServerSheetsConfig>, updatedBy?: string) {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    globalSheetsConfig = {
+      ...globalSheetsConfig,
+      ...newConfig,
+      updatedAt: new Date().toISOString(),
+      updatedBy: updatedBy || 'Painel Central WFS',
+    };
+    if (globalSheetsConfig.webhookUrl && globalSheetsConfig.webhookUrl.startsWith('http')) {
+      globalWebhookUrl = globalSheetsConfig.webhookUrl;
+    }
+    fs.writeFileSync(CONFIG_FILE_PATH, JSON.stringify(globalSheetsConfig, null, 2), 'utf-8');
+    console.log('[CONFIG] sheets_config.json persistido com sucesso.');
+    return true;
+  } catch (err) {
+    console.error('[CONFIG] Erro ao persistir sheets_config.json:', err);
+    return false;
+  }
+}
+
+// Initial load of sheets config
+loadPersistentSheetsConfig();
+
 // Helper to send events directly to Google Apps Script Webhook
 async function sendToGoogleAppsScriptWebhook(
   payload: Record<string, any>,
@@ -94,6 +180,8 @@ async function sendToGoogleAppsScriptWebhook(
   const targetUrl =
     explicitWebhookUrl && typeof explicitWebhookUrl === 'string' && explicitWebhookUrl.startsWith('http')
       ? explicitWebhookUrl
+      : globalSheetsConfig.webhookUrl && globalSheetsConfig.webhookUrl.startsWith('http')
+      ? globalSheetsConfig.webhookUrl
       : globalWebhookUrl && globalWebhookUrl.startsWith('http')
       ? globalWebhookUrl
       : process.env.GOOGLE_WEBHOOK_URL;
@@ -103,8 +191,10 @@ async function sendToGoogleAppsScriptWebhook(
     return { success: false, error: 'Webhook URL não configurada' };
   }
 
-  // Cache for future requests
-  if (!globalWebhookUrl && targetUrl) {
+  // Cache for future requests and persist if newly provided
+  if (explicitWebhookUrl && explicitWebhookUrl.startsWith('http') && explicitWebhookUrl !== globalSheetsConfig.webhookUrl) {
+    savePersistentSheetsConfig({ webhookUrl: explicitWebhookUrl });
+  } else if (!globalWebhookUrl && targetUrl) {
     globalWebhookUrl = targetUrl;
   }
 
@@ -1260,6 +1350,8 @@ app.get('/api/system/events', (req: Request, res: Response) => {
     masterEmail: MASTER_EMAIL,
     users: serverUsers.map(sanitizeUser),
     appState: sharedAppState,
+    sheetsConfig: globalSheetsConfig,
+    hasWebhook: Boolean(globalSheetsConfig.webhookUrl && globalSheetsConfig.webhookUrl.startsWith('http')),
     serverTime: new Date().toISOString(),
   });
   res.write(`data: ${initialPayload}\n\n`);
@@ -1338,6 +1430,52 @@ app.post('/api/system/maintenance', async (req: Request, res: Response) => {
 });
 
 /* =========================================================================
+   SHEETS & GOOGLE INTEGRATION CONFIGURATION (SYNCS WEBHOOK ACROSS ALL PCS)
+   ========================================================================= */
+
+app.get('/api/config/sheets', (_req: Request, res: Response) => {
+  return res.status(200).json({
+    success: true,
+    config: globalSheetsConfig,
+    hasWebhook: Boolean(globalSheetsConfig.webhookUrl && globalSheetsConfig.webhookUrl.startsWith('http')),
+  });
+});
+
+app.post('/api/config/sheets', (req: Request, res: Response) => {
+  try {
+    const body = req.body || {};
+    const webhookUrl = typeof body.webhookUrl === 'string' ? body.webhookUrl.trim() : globalSheetsConfig.webhookUrl;
+
+    savePersistentSheetsConfig({
+      webhookUrl: webhookUrl || globalSheetsConfig.webhookUrl,
+      sheetUrl: body.sheetUrl || globalSheetsConfig.sheetUrl,
+      sheetId: body.sheetId || globalSheetsConfig.sheetId,
+      driveFolderUrl: body.driveFolderUrl || globalSheetsConfig.driveFolderUrl,
+      driveFolderId: body.driveFolderId || globalSheetsConfig.driveFolderId,
+      photosSheetName: body.photosSheetName || globalSheetsConfig.photosSheetName,
+      ownerEmail: body.ownerEmail || globalSheetsConfig.ownerEmail,
+      autoSync: body.autoSync !== undefined ? body.autoSync : globalSheetsConfig.autoSync,
+    }, body.updatedBy || 'Cliente WFS');
+
+    // Broadcast update immediately to all connected browsers across all PCs via SSE
+    broadcastSystemEvent({
+      type: 'CONFIG_CHANGE',
+      sheetsConfig: globalSheetsConfig,
+      hasWebhook: Boolean(globalSheetsConfig.webhookUrl && globalSheetsConfig.webhookUrl.startsWith('http')),
+      timestamp: new Date().toISOString(),
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Configuração do Google Sheets salva e propagada para todos os PCs conectados!',
+      config: globalSheetsConfig,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* =========================================================================
    SHARED GLOBAL APPLICATION STATE (SYNCS ORDERS & CONFIGS ACROSS SESSIONS)
    ========================================================================= */
 
@@ -1346,6 +1484,8 @@ app.get('/api/state', (_req: Request, res: Response) => {
     success: true,
     isMaintenanceMode,
     appState: sharedAppState,
+    sheetsConfig: globalSheetsConfig,
+    hasWebhook: Boolean(globalSheetsConfig.webhookUrl && globalSheetsConfig.webhookUrl.startsWith('http')),
     driveFolderId: DRIVE_FOLDER_ID,
     photosSheetName: PHOTOS_SHEET_NAME,
   });
@@ -1353,19 +1493,23 @@ app.get('/api/state', (_req: Request, res: Response) => {
 
 app.post('/api/state', (req: Request, res: Response) => {
   try {
-    const { orders, invoices, clients, equipments, laborServices, company } = req.body;
+    const { orders, invoices, clients, equipments, laborServices, company, sheetsConfig } = req.body;
     if (orders) sharedAppState.orders = orders;
     if (invoices) sharedAppState.invoices = invoices;
     if (clients) sharedAppState.clients = clients;
     if (equipments) sharedAppState.equipments = equipments;
     if (laborServices) sharedAppState.laborServices = laborServices;
     if (company) sharedAppState.company = company;
+    if (sheetsConfig && typeof sheetsConfig === 'object') {
+      savePersistentSheetsConfig(sheetsConfig, 'Sincronização de Estado');
+    }
     sharedAppState.updatedAt = new Date().toISOString();
 
     // Broadcast update to all other connected clients
     broadcastSystemEvent({
       type: 'STATE_CHANGE',
       appState: sharedAppState,
+      sheetsConfig: globalSheetsConfig,
       timestamp: new Date().toISOString(),
     });
 
@@ -1700,7 +1844,16 @@ app.post('/api/drive/upload-canhoto', async (req: Request, res: Response) => {
 
     const targetWebhook = (webhookUrl && typeof webhookUrl === 'string' && webhookUrl.startsWith('http'))
       ? webhookUrl
+      : (globalSheetsConfig.webhookUrl && globalSheetsConfig.webhookUrl.startsWith('http'))
+      ? globalSheetsConfig.webhookUrl
+      : (globalWebhookUrl && globalWebhookUrl.startsWith('http'))
+      ? globalWebhookUrl
       : process.env.GOOGLE_WEBHOOK_URL;
+
+    // If client supplied a valid webhook, update server persistent config so all other PCs get it
+    if (webhookUrl && typeof webhookUrl === 'string' && webhookUrl.startsWith('http') && webhookUrl !== globalSheetsConfig.webhookUrl) {
+      savePersistentSheetsConfig({ webhookUrl });
+    }
 
     if (targetWebhook) {
       try {

@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Camera,
   CheckCircle2,
@@ -12,7 +12,8 @@ import {
   AlertTriangle,
   FileCheck,
   Sparkles,
-  ArrowRight
+  ArrowRight,
+  Link as LinkIcon
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import {
@@ -21,7 +22,10 @@ import {
   OFFICIAL_DRIVE_FOLDER_ID,
   OFFICIAL_DRIVE_FOLDER_NAME,
   OFFICIAL_PHOTOS_SHEET_NAME,
-  getSheetsConfig
+  getSheetsConfig,
+  saveSheetsConfig,
+  syncSheetsConfigFromServer,
+  SheetsSyncConfig
 } from '../services/sheetsService';
 import { optimizeImageForUpload } from '../utils/imageOptimizer';
 
@@ -56,9 +60,33 @@ export const DigitalizarOSModal: React.FC<DigitalizarOSModalProps> = ({
   const [optionalTag, setOptionalTag] = useState<string>('');
   const [uploadedInfo, setUploadedInfo] = useState<UploadedFileInfo | null>(null);
   const [createdOrderId, setCreatedOrderId] = useState<string | null>(null);
+  const [sheetsConfig, setSheetsConfig] = useState<SheetsSyncConfig>(() => getSheetsConfig());
+  const [isSyncingServer, setIsSyncingServer] = useState<boolean>(false);
+  const [showManualInput, setShowManualInput] = useState<boolean>(false);
+  const [inputWebhookUrl, setInputWebhookUrl] = useState<string>('');
+  const [syncFeedbackMessage, setSyncFeedbackMessage] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Sync latest Sheets/Webhook config from server when opening the modal
+  useEffect(() => {
+    syncSheetsConfigFromServer()
+      .then((cfg) => {
+        if (cfg) {
+          setSheetsConfig(cfg);
+        }
+      })
+      .catch(() => {});
+
+    const handleConfigEvent = (e: any) => {
+      if (e.detail) {
+        setSheetsConfig(e.detail);
+      }
+    };
+    window.addEventListener('wfs_sheets_config_changed', handleConfigEvent);
+    return () => window.removeEventListener('wfs_sheets_config_changed', handleConfigEvent);
+  }, []);
 
   const handleFileSelect = async (file: File) => {
     if (!file.type.startsWith('image/')) {
@@ -95,6 +123,18 @@ export const DigitalizarOSModal: React.FC<DigitalizarOSModalProps> = ({
 
       // 2. Direct upload to Google Drive folder - NO FRONT-END OCR
       setUploadStatusText('Encaminhando diretamente para a pasta do Google Drive (Fotos_SO)...');
+
+      // Ensure we have the latest config from the central server before uploading
+      let currentCfg = getSheetsConfig();
+      if (!currentCfg.webhookUrl) {
+        try {
+          const fresh = await syncSheetsConfigFromServer();
+          if (fresh && fresh.webhookUrl) {
+            currentCfg = fresh;
+            setSheetsConfig(fresh);
+          }
+        } catch {}
+      }
 
       const tagClean = optionalTag.trim().replace(/[^a-zA-Z0-9_-]/g, '') || `CANHOTO-${Date.now().toString().slice(-6)}`;
       const cleanFileName = `Canhoto_${tagClean}_${Date.now()}.jpg`;
@@ -219,15 +259,108 @@ export const DigitalizarOSModal: React.FC<DigitalizarOSModalProps> = ({
                 </div>
               </div>
 
-              {!getSheetsConfig().webhookUrl && (
-                <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3.5 text-xs text-amber-900 flex items-start gap-2.5">
-                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                  <div>
-                    <p className="font-bold">URL do Webhook do Google Apps Script não detectada</p>
-                    <p className="text-[11px] text-amber-800 mt-0.5 leading-relaxed">
-                      Para salvar o arquivo diretamente no Google Drive na versão web/compartilhada, verifique se a URL da implantação do Apps Script está preenchida na aba <strong>Governança &gt; Sincronização Google Sheets</strong>.
-                    </p>
+              {!sheetsConfig.webhookUrl && (
+                <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-xs text-amber-900 space-y-3">
+                  <div className="flex items-start gap-2.5">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    <div className="space-y-1">
+                      <p className="font-bold text-amber-950">URL do Webhook do Google Apps Script não detectada neste PC</p>
+                      <p className="text-[11px] text-amber-800 leading-relaxed">
+                        Se o Webhook já foi configurado em outro computador da empresa ou no servidor, você pode buscá-lo agora com 1 clique:
+                      </p>
+                    </div>
                   </div>
+
+                  <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                    <button
+                      type="button"
+                      disabled={isSyncingServer}
+                      onClick={async () => {
+                        setIsSyncingServer(true);
+                        setSyncFeedbackMessage(null);
+                        try {
+                          const fetched = await syncSheetsConfigFromServer();
+                          setSheetsConfig(fetched);
+                          if (fetched.webhookUrl) {
+                            setSyncFeedbackMessage('Webhook detectado e sincronizado com sucesso do servidor central!');
+                          } else {
+                            setSyncFeedbackMessage('Nenhum webhook ativo no servidor. Cole a URL no campo abaixo.');
+                            setShowManualInput(true);
+                          }
+                        } catch {
+                          setSyncFeedbackMessage('Erro ao comunicar com o servidor.');
+                        } finally {
+                          setIsSyncingServer(false);
+                          setTimeout(() => setSyncFeedbackMessage(null), 5000);
+                        }
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-semibold text-[11px] shadow-xs transition-colors disabled:opacity-50"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${isSyncingServer ? 'animate-spin' : ''}`} />
+                      <span>{isSyncingServer ? 'Buscando do Servidor...' : '🔄 Sincronizar com Servidor / Nuvem'}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setShowManualInput(!showManualInput)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-amber-300 hover:bg-amber-100/60 text-amber-900 rounded-xl font-medium text-[11px] transition-colors"
+                    >
+                      <LinkIcon className="w-3.5 h-3.5 text-amber-700" />
+                      <span>{showManualInput ? 'Ocultar entrada' : 'Inserir URL do Webhook'}</span>
+                    </button>
+                  </div>
+
+                  {syncFeedbackMessage && (
+                    <div className={`text-[11px] font-medium p-2 rounded-lg ${
+                      syncFeedbackMessage.includes('sucesso')
+                        ? 'bg-emerald-100/80 text-emerald-800 border border-emerald-300'
+                        : 'bg-amber-100 text-amber-900 border border-amber-300'
+                    }`}>
+                      {syncFeedbackMessage}
+                    </div>
+                  )}
+
+                  {showManualInput && (
+                    <div className="bg-white border border-amber-200 rounded-xl p-3 space-y-2">
+                      <label className="text-[11px] font-bold text-slate-700 block">
+                        Cole a URL da Implantação do Webhook (Google Apps Script /exec):
+                      </label>
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <input
+                          type="url"
+                          value={inputWebhookUrl}
+                          onChange={(e) => setInputWebhookUrl(e.target.value)}
+                          placeholder="https://script.google.com/macros/s/.../exec"
+                          className="flex-1 bg-slate-50 border border-slate-300 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 placeholder:text-slate-400 focus:outline-hidden focus:border-amber-500 font-mono"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const trimmed = inputWebhookUrl.trim();
+                            if (!trimmed.startsWith('http')) {
+                              alert('A URL deve começar com https://script.google.com/macros/s/...');
+                              return;
+                            }
+                            const updated = {
+                              ...sheetsConfig,
+                              webhookUrl: trimmed,
+                            };
+                            saveSheetsConfig(updated);
+                            setSheetsConfig(updated);
+                            setShowManualInput(false);
+                            setSyncFeedbackMessage('Webhook salvo e ativado para todos os computadores da empresa!');
+                            setTimeout(() => setSyncFeedbackMessage(null), 5000);
+                          }}
+                          className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs rounded-lg transition-colors shadow-xs whitespace-nowrap"
+                        >
+                          Salvar para Todos os PCs
+                        </button>
+                      </div>
+                      <p className="text-[10px] text-slate-500">
+                        Ao salvar aqui, este Webhook é salvo no servidor da nuvem e compartilhado automaticamente com todos os outros computadores.
+                      </p>
+                    </div>
+                  )}
                 </div>
               )}
 

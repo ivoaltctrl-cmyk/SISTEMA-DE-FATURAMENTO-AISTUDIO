@@ -45,6 +45,7 @@ import {
   OFFICIAL_DRIVE_FOLDER_URL,
   OFFICIAL_DRIVE_FOLDER_NAME,
   saveSheetsConfig,
+  syncSheetsConfigFromServer,
   SheetsSyncConfig,
   syncOrdersWithGoogleSheets
 } from '../services/sheetsService';
@@ -87,6 +88,29 @@ export const SheetsSyncManager: React.FC = () => {
     setDriveFolderInput(current.driveFolderUrl || OFFICIAL_DRIVE_FOLDER_URL);
     setOwnerEmailInput(current.ownerEmail || 'ivoaltctrl@gmail.com');
     setAutoSync(current.autoSync ?? true);
+
+    // Fetch latest configuration from central server in case configured on another PC
+    syncSheetsConfigFromServer().then((srv) => {
+      if (srv) {
+        setConfig(srv);
+        if (srv.webhookUrl) setWebhookInput(srv.webhookUrl);
+        if (srv.sheetUrl) setSheetUrlInput(srv.sheetUrl);
+        if (srv.driveFolderUrl) setDriveFolderInput(srv.driveFolderUrl);
+        if (srv.ownerEmail) setOwnerEmailInput(srv.ownerEmail);
+      }
+    }).catch(() => {});
+
+    // Listen to real-time events when another tab or PC updates config
+    const handleConfigEvent = (e: any) => {
+      if (e.detail) {
+        setConfig(e.detail);
+        if (e.detail.webhookUrl) setWebhookInput(e.detail.webhookUrl);
+        if (e.detail.sheetUrl) setSheetUrlInput(e.detail.sheetUrl);
+        if (e.detail.driveFolderUrl) setDriveFolderInput(e.detail.driveFolderUrl);
+      }
+    };
+    window.addEventListener('wfs_sheets_config_changed', handleConfigEvent);
+    return () => window.removeEventListener('wfs_sheets_config_changed', handleConfigEvent);
   }, []);
 
   const handleSaveSettings = () => {
@@ -102,9 +126,9 @@ export const SheetsSyncManager: React.FC = () => {
     setConfig(updated);
     setSyncFeedback({
       type: 'success',
-      message: 'Configurações de integração salvas com sucesso!',
+      message: 'Configurações salvas e transmitidas instantaneamente para todos os PCs conectados!',
     });
-    setTimeout(() => setSyncFeedback(null), 3000);
+    setTimeout(() => setSyncFeedback(null), 4000);
   };
 
   const handleManualSync = async () => {
@@ -584,16 +608,47 @@ export const SheetsSyncManager: React.FC = () => {
           </div>
 
           <div>
-            <label className="block text-xs font-bold text-slate-700 mb-1">
-              URL do Webhook do Google Apps Script (Opcional):
-            </label>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-xs font-bold text-slate-700">
+                URL do Webhook do Google Apps Script:
+              </label>
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    const fresh = await syncSheetsConfigFromServer();
+                    if (fresh) {
+                      setConfig(fresh);
+                      if (fresh.webhookUrl) setWebhookInput(fresh.webhookUrl);
+                      setSyncFeedback({
+                        type: 'success',
+                        message: fresh.webhookUrl ? 'Webhook puxado do servidor com sucesso!' : 'Nenhum webhook ativo no servidor central.',
+                      });
+                      setTimeout(() => setSyncFeedback(null), 3500);
+                    }
+                  } catch {
+                    setSyncFeedback({ type: 'error', message: 'Erro ao consultar servidor central.' });
+                    setTimeout(() => setSyncFeedback(null), 3500);
+                  }
+                }}
+                className="text-[10px] font-bold text-amber-700 hover:text-amber-900 flex items-center gap-1 bg-amber-50 hover:bg-amber-100 px-2 py-0.5 rounded-lg border border-amber-200 transition-colors"
+                title="Puxar a configuração mais recente salva em outro computador"
+              >
+                <RefreshCw className="w-2.5 h-2.5" />
+                <span>Puxar de Outro PC</span>
+              </button>
+            </div>
             <input
               type="text"
               value={webhookInput}
               onChange={(e) => setWebhookInput(e.target.value)}
-              className="w-full bg-slate-50 border border-slate-300 rounded-xl p-2.5 text-xs text-slate-900 font-medium focus:ring-2 focus:ring-red-500 focus:bg-white focus:outline-hidden"
+              className="w-full bg-slate-50 border border-slate-300 rounded-xl p-2.5 text-xs text-slate-900 font-medium focus:ring-2 focus:ring-red-500 focus:bg-white focus:outline-hidden font-mono"
               placeholder="https://script.google.com/macros/s/.../exec"
             />
+            <span className="text-[10px] text-emerald-700 mt-1 flex items-center gap-1">
+              <CheckCircle2 className="w-3 h-3 text-emerald-600 shrink-0" />
+              <span>Sincronização em nuvem ativa: ao salvar, todos os computadores da empresa recebem esta URL automaticamente.</span>
+            </span>
           </div>
 
           <div className="sm:col-span-2">
